@@ -21,9 +21,10 @@ static int doing_sunrise = 0;
 static int sound_alarm = 0;
 
 static int got_buzzer_intr;
-static long buzzer_tstamps[2];
-static long sound_alarm_start;
-static long sunrise_start_time;
+static unsigned long buzzer_tstamps[2];
+static unsigned long sound_alarm_start;
+static unsigned long sunrise_start_time;
+static unsigned long sunrise_stop_at;
 
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
 #define ANALOG_RESOLUTION 8
@@ -38,26 +39,20 @@ float bri(float in)
 
 void set_led(float r, float g, float b)
 {
-	/*r = bri(r);
+	r = bri(r);
 	g = bri(g);
 	b = bri(b);
-*/
+
 	analogWrite(R, r * ANALOG_MAX);
 	analogWrite(G, g * ANALOG_MAX);
 	analogWrite(B, b * ANALOG_MAX);
-	Serial.print("Set LEDs to ");
-	Serial.print(r);
-	Serial.print(" ");
-	Serial.print(g);
-	Serial.print(" ");
-	Serial.println(b);
-
+	printf("Set LEDs to %d %d %d\n", (int)(r*100), (int)(g*100), (int)(b*100));
 }
 
 void buzzer_interrupt(void)
 {	
 	buzzer_tstamps[PCintPort::pinState] = millis();
-//	if (PCintPort::pinState == HIGH)
+	if (PCintPort::pinState == HIGH)
 		got_buzzer_intr = 1;
 }
 
@@ -89,10 +84,7 @@ int buzzer_handle_silence_time(int time)
 			break;
 	}
 
-	Serial.print("Waiting for ");
-	Serial.print(buzzer_wait_for);
-	Serial.print(" got ");
-	Serial.println(time);
+	printf("Waiting for %d got %d\n", buzzer_wait_for, time);
 
 	if (abs(time - buzzer_wait_for) > 2) {
 		// Not the expected delay - reset sequence
@@ -155,7 +147,8 @@ void start_sunrise()
 void stop_sunrise()
 {
 	doing_sunrise = 0;
-	Serial.println("stopping sunrise");
+	sunrise_stop_at = millis() + 4 * 60 * 1000L;
+	printf("Stopping sunrise sequence, shutting down at %ld, now is %ld\n", sunrise_stop_at, millis());
 }
 
 void sunrise()
@@ -170,11 +163,11 @@ void sunrise()
 			{ 2100,  0.20,   0.10,    0.05},
 			{ 2400,   0.50,   0.12,    0.05}, // Yellowish
 			{ 2700,   0.60,   0.4,   0.2}, // White
-			{ 3600,   1.00,   0.7,   0.4}, // Bright white
+			{ 3600,   1.00,   0.65,   0.45}, // Bright white
 	};
 	struct sequence *s = NULL;
 	int cur_seq;
-	unsigned long delay_in_sunrise = (millis() - sunrise_start_time) / 1000;
+	float delay_in_sunrise = (millis() - sunrise_start_time) / 1000.0;
 #ifdef FAST_SEQ
 	delay_in_sunrise *= 60;
 #endif
@@ -192,26 +185,36 @@ void sunrise()
 
 	// Halt when reaching the last sequence
 	if (cur_seq == sizeof(sunrise_sequence)/sizeof(sunrise_sequence[0]) - 1) {
+		set_led(s->r, s->g, s->b);
 		stop_sunrise();
 		return;
 	}
 
-	pct = ((float)delay_in_sunrise - s->time) / ((s+1)->time - s->time);
+	pct = (delay_in_sunrise - s->time) / ((s+1)->time - s->time);
+//	printf("Pct %d\n", (int)(pct * 1000));
 	delta_r = (s+1)->r - s->r;
 	delta_g = (s+1)->g - s->g;
 	delta_b = (s+1)->b - s->b;
 
-//	Serial.print("pct "); Serial.print(pct); Serial.print(" b "); Serial.println(s->b + delta_b * pct);
 	set_led(s->r + delta_r * pct, s->g + delta_g * pct, s->b + delta_b * pct);
-	
 }
 
+void strobe()
+{
+	int i = 1000;
+
+	while (i--) {
+		set_led(1.0, 1.0, 1.0);
+		delay(30);
+		set_led(0.0, 0.0, 0.0);
+		delay(30);
+	}
+}
 
 void setup(){
 	//start serial connection
 	printf_begin();
 	Serial.begin(9600);
-	//configure pin2 as an input and enable the internal pull-up resistor
 	pinMode(BUZZER_IN_PIN, INPUT);
 	pinMode(ALARM_BUTTON, OUTPUT); 
 //	pinMode(BUZZER_OUT_PIN, OUTPUT);
@@ -220,6 +223,7 @@ void setup(){
 
 //	analogWrite(BUZZER_OUT_PIN, 0);
 
+//	strobe();
 	alarm_now();
 }
 
@@ -238,6 +242,9 @@ void loop(){
 	// Should we do the sunrise sequence?
 	if (doing_sunrise) {
 		sunrise();
+	} else if (sunrise_stop_at && millis() > sunrise_stop_at) {
+		set_led(0, 0, 0);
+		sunrise_stop_at = 0;
 	}
 
 	// Should we emit a sound?

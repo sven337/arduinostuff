@@ -130,11 +130,11 @@ void ring_buzzer()
 		val = 127;
 	}
 
-	analogWrite(3, val);
+	analogWrite(BUZZER_OUT_PIN, val);
 	
 	if ((time - sound_alarm_start) >> 10 > 30) {
 		sound_alarm = 0;
-		analogWrite(3, 0);
+		analogWrite(BUZZER_OUT_PIN, 0);
 	}
 }
 
@@ -217,14 +217,9 @@ void setup(){
 	Serial.begin(9600);
 	pinMode(BUZZER_IN_PIN, INPUT);
 	pinMode(ALARM_BUTTON, OUTPUT); 
-//	pinMode(BUZZER_OUT_PIN, OUTPUT);
+	pinMode(BUZZER_OUT_PIN, OUTPUT);
 	PCintPort::attachInterrupt(BUZZER_IN_PIN, &buzzer_interrupt, CHANGE);
 	digitalWrite(ALARM_BUTTON, HIGH);
-
-//	analogWrite(BUZZER_OUT_PIN, 0);
-
-//	strobe();
-	alarm_now();
 }
 
 void loop(){

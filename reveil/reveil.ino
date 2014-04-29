@@ -248,6 +248,8 @@ void setup(){
 	printf("a\n");
 	radio.printDetails();
 	printf("b\n");
+
+	bitSet(TCCR1B, WGM12);
 }
 
 void loop(){

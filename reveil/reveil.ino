@@ -30,6 +30,8 @@ static unsigned long sunrise_stop_at;
 #define ANALOG_RESOLUTION 8
 #define ANALOG_MAX ((1 << ANALOG_RESOLUTION) - 1)
 
+#define FAST_SUNRISE 0
+
 float bri(float in)
 {
 	// Maps linear 0 -> 1.0 to logarithmic 0.0 -> 1.0
@@ -153,10 +155,9 @@ void stop_sunrise()
 
 void sunrise()
 {
-#define FAST_SEQ 1
 // see https://svn.kapsi.fi/jpa/led-controller/sw/src/led_task.c
     struct sequence sunrise_sequence[] = { 
-			{ 0,         0,    0,    0},
+			{ 0,         0,    0,    0.01},
 			{ 600,       0,    0,    0.02}, // Dark blue
 			{ 1200,  0.05,    0.02,    0.05},
 			{ 1800,  0.10,    0.02,    0.05}, // Sun begins to rise
@@ -168,7 +169,7 @@ void sunrise()
 	struct sequence *s = NULL;
 	int cur_seq;
 	float delay_in_sunrise = (millis() - sunrise_start_time) / 1000.0;
-#ifdef FAST_SEQ
+#if FAST_SUNRISE
 	delay_in_sunrise *= 60;
 #endif
 	float pct;

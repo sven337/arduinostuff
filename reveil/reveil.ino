@@ -40,7 +40,7 @@ static unsigned long sunrise_stop_at;
 RF24 radio(CE_PIN, CSN_PIN);
 
 // see https://svn.kapsi.fi/jpa/led-controller/sw/src/led_task.c
-struct sequence sunrise_sequence[] = { 
+const struct sequence sunrise_sequence[] = { 
 		{ 0,         0,    0,    0.01},
 		{ 300,       0,    0,    0.02}, // Dark blue
 		{ 900,  0.05,    0.02,    0.05},
@@ -174,7 +174,7 @@ void stop_sunrise()
 
 void sunrise()
 {
-	struct sequence *s = NULL;
+	const struct sequence *s = NULL;
 	int cur_seq;
 	float delay_in_sunrise = (millis() - sunrise_start_time) / 1000.0;
 #if FAST_SUNRISE

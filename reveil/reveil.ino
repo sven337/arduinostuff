@@ -39,6 +39,18 @@ static unsigned long sunrise_stop_at;
 
 RF24 radio(CE_PIN, CSN_PIN);
 
+// see https://svn.kapsi.fi/jpa/led-controller/sw/src/led_task.c
+struct sequence sunrise_sequence[] = { 
+		{ 0,         0,    0,    0.01},
+		{ 300,       0,    0,    0.02}, // Dark blue
+		{ 900,  0.05,    0.02,    0.05},
+		{ 1500,  0.10,    0.02,    0.05}, // Sun begins to rise
+		{ 1800,  0.20,   0.10,    0.05},
+		{ 2100,   0.50,   0.12,    0.05}, // Yellowish
+		{ 2400,   0.60,   0.4,   0.2}, // White
+		{ 3600,   1.00,   0.65,   0.45}, // Bright white
+};
+
 float bri(float in)
 {
 	// Maps linear 0 -> 1.0 to logarithmic 0.0 -> 1.0
@@ -162,17 +174,6 @@ void stop_sunrise()
 
 void sunrise()
 {
-// see https://svn.kapsi.fi/jpa/led-controller/sw/src/led_task.c
-    struct sequence sunrise_sequence[] = { 
-			{ 0,         0,    0,    0.01},
-			{ 300,       0,    0,    0.02}, // Dark blue
-			{ 900,  0.05,    0.02,    0.05},
-			{ 1500,  0.10,    0.02,    0.05}, // Sun begins to rise
-			{ 1800,  0.20,   0.10,    0.05},
-			{ 2100,   0.50,   0.12,    0.05}, // Yellowish
-			{ 2400,   0.60,   0.4,   0.2}, // White
-			{ 3600,   1.00,   0.65,   0.45}, // Bright white
-	};
 	struct sequence *s = NULL;
 	int cur_seq;
 	float delay_in_sunrise = (millis() - sunrise_start_time) / 1000.0;

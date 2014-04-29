@@ -1,9 +1,14 @@
+#include <SPI.h>
 #include <PinChangeInt.h>
 #include "printf.h" 
+#include "nRF24L01.h"
+#include "RF24.h"
 
 const int BUZZER_IN_PIN = 4; // P1
 const int ALARM_BUTTON = 17; // P3
 const int BUZZER_OUT_PIN = 3; // P3 analog 0
+const int CE_PIN = 8;
+const int CSN_PIN = 7;
 
 const int R = 6;
 const int G = 9;
@@ -31,6 +36,8 @@ static unsigned long sunrise_stop_at;
 #define ANALOG_MAX ((1 << ANALOG_RESOLUTION) - 1)
 
 #define FAST_SUNRISE 0
+
+RF24 radio(CE_PIN, CSN_PIN);
 
 float bri(float in)
 {
@@ -216,11 +223,30 @@ void setup(){
 	//start serial connection
 	printf_begin();
 	Serial.begin(9600);
+	printf("0\n");
 	pinMode(BUZZER_IN_PIN, INPUT);
 	pinMode(ALARM_BUTTON, OUTPUT); 
 	pinMode(BUZZER_OUT_PIN, OUTPUT);
 	PCintPort::attachInterrupt(BUZZER_IN_PIN, &buzzer_interrupt, CHANGE);
 	digitalWrite(ALARM_BUTTON, HIGH);
+	printf("1\n");
+	radio.begin();
+	radio.setRetries(15, 15);
+	printf("1\n");
+	radio.setAutoAck(false);
+	printf("1\n");
+	radio.setChannel(95);
+	printf("1\n");
+	radio.setPayloadSize(sizeof(unsigned long));
+	printf("1\n");
+	radio.setPALevel(RF24_PA_MAX);
+	printf("1\n");
+	radio.setDataRate(RF24_250KBPS);
+	printf("3\n");
+
+	printf("a\n");
+	radio.printDetails();
+	printf("b\n");
 }
 
 void loop(){

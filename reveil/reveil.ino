@@ -165,12 +165,12 @@ void sunrise()
 // see https://svn.kapsi.fi/jpa/led-controller/sw/src/led_task.c
     struct sequence sunrise_sequence[] = { 
 			{ 0,         0,    0,    0.01},
-			{ 600,       0,    0,    0.02}, // Dark blue
-			{ 1200,  0.05,    0.02,    0.05},
-			{ 1800,  0.10,    0.02,    0.05}, // Sun begins to rise
-			{ 2100,  0.20,   0.10,    0.05},
-			{ 2400,   0.50,   0.12,    0.05}, // Yellowish
-			{ 2700,   0.60,   0.4,   0.2}, // White
+			{ 300,       0,    0,    0.02}, // Dark blue
+			{ 900,  0.05,    0.02,    0.05},
+			{ 1500,  0.10,    0.02,    0.05}, // Sun begins to rise
+			{ 1800,  0.20,   0.10,    0.05},
+			{ 2100,   0.50,   0.12,    0.05}, // Yellowish
+			{ 2400,   0.60,   0.4,   0.2}, // White
 			{ 3600,   1.00,   0.65,   0.45}, // Bright white
 	};
 	struct sequence *s = NULL;

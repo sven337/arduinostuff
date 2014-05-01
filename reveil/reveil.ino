@@ -22,14 +22,19 @@ struct sequence {
 };
 
 // "Worklist"
-static int doing_sunrise = 0;
+enum sequence_type {
+	NONE = 0,
+	SUNRISE = 1,
+	SUNSET = 2,
+	STROBE = 3,
+} doing_sequence;
 static int sound_alarm = 0;
 
 static int got_buzzer_intr;
 static unsigned long buzzer_tstamps[2];
 static unsigned long sound_alarm_start;
-static unsigned long sunrise_start_time;
-static unsigned long sunrise_stop_at;
+static unsigned long sequence_start_time;
+static unsigned long lights_out_at;
 
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
 #define ANALOG_RESOLUTION 8
@@ -38,6 +43,7 @@ static unsigned long sunrise_stop_at;
 #define FAST_SUNRISE 0
 
 RF24 radio(CE_PIN, CSN_PIN);
+const uint64_t address_pi = 0xF0F0F0F0F1LL;
 
 // see https://svn.kapsi.fi/jpa/led-controller/sw/src/led_task.c
 const struct sequence sunrise_sequence[] = { 
@@ -49,6 +55,17 @@ const struct sequence sunrise_sequence[] = {
 		{ 2100,   0.50,   0.12,    0.05}, // Yellowish
 		{ 2400,   0.60,   0.4,   0.2}, // White
 		{ 3600,   1.00,   0.65,   0.45}, // Bright white
+};
+
+const struct sequence sunset_sequence[] = { 
+		{ 0,   1.00,   0.65,   0.45}, // Bright white
+		{ 150,   0.60,   0.4,   0.2}, // White
+		{ 450,   0.50,   0.12,    0.05}, // Yellowish
+		{ 750,  0.20,   0.10,    0.05},
+		{ 900,  0.10,    0.02,    0.05}, // Sun begins to rise
+		{ 1050,  0.05,    0.02,    0.05},
+		{ 1200,       0,    0,    0.02}, // Dark blue
+		{ 1800,         0,    0,    0.01},
 };
 
 float bri(float in)
@@ -89,7 +106,7 @@ int buzzer_handle_silence_time(int time)
 	}	
 
 	// If in an alarm right now, ignore
-	if (doing_sunrise) {
+	if (doing_sequence) {
 		return 0;
 	}
 
@@ -129,8 +146,7 @@ int buzzer_handle_silence_time(int time)
 // Handle alarm situation
 void alarm_now(void)
 {
-	// Take note that an alarm happened
-	start_sunrise();
+	start_sequence(SUNRISE);
 
 	// Shut down the alarm on the clock
 	digitalWrite(ALARM_BUTTON, LOW);
@@ -159,51 +175,51 @@ void ring_buzzer()
 	}
 }
 
-void start_sunrise()
+void start_sequence(int which)
 {
-	doing_sunrise = 1;
-	sunrise_start_time = millis();
+	doing_sequence = (enum sequence_type) which;
+	sequence_start_time = millis();
 }
 
-void stop_sunrise()
+void stop_sequence()
 {
-	doing_sunrise = 0;
-	sunrise_stop_at = millis() + 4 * 60 * 1000L;
-	printf("Stopping sunrise sequence, shutting down at %ld, now is %ld\n", sunrise_stop_at, millis());
+	doing_sequence = NONE;
+	lights_out_at = millis() + 4 * 60 * 1000L;
+	printf("Stopping sequence, shutting down lights at %ld, now is %ld\n", lights_out_at, millis());
 }
 
-void sunrise()
+void led_sequence(const struct sequence *seq, int seq_size)
 {
 	const struct sequence *s = NULL;
 	int cur_seq;
-	float delay_in_sunrise = (millis() - sunrise_start_time) / 1000.0;
+	float delay_in_sequence = (millis() - sequence_start_time) / 1000.0;
 #if FAST_SUNRISE
-	delay_in_sunrise *= 60;
+	delay_in_sequence *= 60;
 #endif
 	float pct;
 	float delta_r, delta_g, delta_b;
 
 
 	// Compute current sequence number
-	for (cur_seq = ARRAY_SZ(sunrise_sequence) - 1; cur_seq >= 0; cur_seq--) {
-		if (delay_in_sunrise >= sunrise_sequence[cur_seq].time) {
-			s = &sunrise_sequence[cur_seq];
+	for (cur_seq = seq_size - 1; cur_seq >= 0; cur_seq--) {
+		if (delay_in_sequence >= seq[cur_seq].time) {
+			s = &seq[cur_seq];
 			break;
 		}
 	}
 
 	// Halt when reaching the last sequence
-	if (cur_seq == sizeof(sunrise_sequence)/sizeof(sunrise_sequence[0]) - 1) {
+	if (cur_seq == seq_size - 1) {
 		set_led(s->r, s->g, s->b);
-		stop_sunrise();
+		stop_sequence();
 		return;
 	}
 
-	pct = (delay_in_sunrise - s->time) / ((s+1)->time - s->time);
-//	printf("Pct %d\n", (int)(pct * 1000));
+	pct = (delay_in_sequence - s->time) / ((s+1)->time - s->time);
 	delta_r = (s+1)->r - s->r;
 	delta_g = (s+1)->g - s->g;
 	delta_b = (s+1)->b - s->b;
+		printf("Pct %d, delta_r %d\n", (int)(pct * 1000), (int)(delta_r * 1000));
 
 	set_led(s->r + delta_r * pct, s->g + delta_g * pct, s->b + delta_b * pct);
 }
@@ -230,26 +246,23 @@ void setup(){
 	pinMode(BUZZER_OUT_PIN, OUTPUT);
 	PCintPort::attachInterrupt(BUZZER_IN_PIN, &buzzer_interrupt, CHANGE);
 	digitalWrite(ALARM_BUTTON, HIGH);
-	printf("1\n");
 	radio.begin();
+	radio.powerDown();
 	radio.setRetries(15, 15);
-	printf("1\n");
 	radio.setAutoAck(false);
-	printf("1\n");
 	radio.setChannel(95);
-	printf("1\n");
 	radio.setPayloadSize(sizeof(unsigned long));
-	printf("1\n");
 	radio.setPALevel(RF24_PA_MAX);
-	printf("1\n");
 	radio.setDataRate(RF24_250KBPS);
-	printf("3\n");
+	radio.openReadingPipe(1, address_pi);
+	radio.startListening();
 
-	printf("a\n");
 	radio.printDetails();
-	printf("b\n");
 
+	// fix PWM (LED flicker)
 	bitSet(TCCR1B, WGM12);
+
+	doing_sequence = NONE;
 }
 
 void loop(){
@@ -265,16 +278,37 @@ void loop(){
 	}
 
 	// Should we do the sunrise sequence?
-	if (doing_sunrise) {
-		sunrise();
-	} else if (sunrise_stop_at && millis() > sunrise_stop_at) {
-		set_led(0, 0, 0);
-		sunrise_stop_at = 0;
+	switch (doing_sequence) {
+		case SUNRISE:
+			led_sequence(sunrise_sequence, ARRAY_SZ(sunrise_sequence));
+			break;
+		case SUNSET:
+			led_sequence(sunset_sequence, ARRAY_SZ(sunset_sequence));
+			break;
+		case STROBE:
+			strobe();
+			break;
+		case NONE:
+			if (lights_out_at && millis() > lights_out_at) {
+				set_led(0, 0, 0);
+				lights_out_at = 0;
+			}
+			//fall through to save 2 bytes of program memory :)
+		default:
+			doing_sequence = NONE;
 	}
 
-	// Should we emit a sound?
+	// Should we emit a sound?... not with my broken buzzer
 	if (sound_alarm) {
 		ring_buzzer();
+	}
+
+	while (radio.available()) {
+		Serial.println("Radio available");
+		uint8_t payload[4];
+		radio.read(payload, 4);
+		printf("Received payload %d\n", payload[0], payload[1], payload[2], payload[3]);
+		start_sequence(payload[0]);
 	}
 
 }

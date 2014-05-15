@@ -91,7 +91,7 @@ void setup(void)
 	radio.powerDown();
 	led(LED_BLEUE, false);
 	radio.setRetries(15, 15);
-	radio.setAutoAck(false);
+	radio.setAutoAck(true);
 	radio.setChannel(95);
 	radio.setPayloadSize(sizeof(unsigned long));
 	radio.setPALevel(RF24_PA_MAX);

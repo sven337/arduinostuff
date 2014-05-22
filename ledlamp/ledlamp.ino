@@ -11,7 +11,7 @@ const int LDR_PIN = A0; // P1 A
 const int THERM_PIN = 5; // P2 D
 
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
-#define DIM_MAX 1000.0
+#define DIM_MAX 300.0
 
 RF24 radio(CE_PIN, CSN_PIN);
 const uint64_t pipe_address = 0xF0F0F0F0F2LL;
@@ -53,6 +53,11 @@ int get_light_level()
 	return analogRead(LDR_PIN);
 }
 
+void radio_send_light_duty_cycle(uint8_t event_type)
+{
+		radio_send('D', event_type, (uint8_t)(light_duty_cycle * 100.0), 0);
+}
+
 int change_light_output(float pct)
 {
 	char change = 0;
@@ -68,7 +73,7 @@ int change_light_output(float pct)
 
 	if (change) {
 		set_led(light_duty_cycle);
-		radio_send('L', change, (uint8_t)(light_duty_cycle * 100.0), 0);
+		radio_send_light_duty_cycle(change);
 	}
 }
 
@@ -168,6 +173,20 @@ void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	delay(10);
 }
 
+void radio_send_temperature(uint8_t type, int temperature)
+{
+	radio_send('T', type, temperature & 0xFF, (temperature >> 8) & 0xFF);
+}
+
+void radio_send_light_target()
+{
+	if (lamp_off) {
+		radio_send('R', 'O', 'F', 'F');
+	} else {
+		radio_send('R', '1', target_light_level & 0xFF, (target_light_level >> 8) & 0xFF);
+	}
+}
+
 void setup(){
 	printf_begin();
 	Serial.begin(9600);
@@ -175,7 +194,7 @@ void setup(){
 	// Radio init
 	radio.begin();
 	radio.powerDown();
-	radio.setRetries(15, 10);
+	radio.setRetries(15, 15);
 	radio.setChannel(95);
 	radio.setCRCLength(RF24_CRC_16);
 	radio.setPayloadSize(sizeof(unsigned long));
@@ -200,15 +219,15 @@ void setup(){
 void loop(){
 
 	int light_level = get_light_level();
-	if (!thermal_override && !lamp_off && millis() > next_lightlevel_check_at) {
-		if (light_level > (float)target_light_level * 1.1) {
+	if (!thermal_override && !lamp_off /*&& millis() > next_lightlevel_check_at*/) {
+		if (light_level > target_light_level + 3) {
 			increase_light_output();
 //			printf("Light at %d, high target %d, increasing duty cycle.\n", light_level, (int)(1.1 * (float)target_light_level));
-		} else if (light_level < (float)target_light_level * 0.9) {
+		} else if (light_level < target_light_level - 3) {
 			decrease_light_output();
 //			printf("Light at %d, low target %d, decreasing duty cycle.\n", light_level, (int)(0.9 * (float)target_light_level));
 		}
-		next_lightlevel_check_at = millis() + 100;
+//		next_lightlevel_check_at = millis() + 100;
 	}
 
 	if (millis() > next_temperature_check_at) {
@@ -216,17 +235,17 @@ void loop(){
 		next_temperature_check_at = millis() + 30000;
 		if (temp > 8000) {
 			printf("Thermal emergency, temp %d.", temp);
-			radio_send('T', 'E', temp/100, 0);
+			radio_send_temperature('E', temp);
 			thermal_override = 1;
 			decrease_light_output(1.0);
 		} else if (temp > 6000) {// 60 C 
 			printf("Thermal alarm, temp %d.", temp);
-			radio_send('T', 'A', temp/100, 0);
+			radio_send_temperature('A', temp);
 			thermal_override = 1;
 			decrease_light_output(0.1);
 			next_temperature_check_at = millis() + 5000;
 		} else if (thermal_override && temp < 5500) {
-			radio_send('T', '0', temp/100, 0);
+			radio_send_temperature('0', temp);
 			printf("End thermal alarm.");
 			thermal_override = 0;
 		}
@@ -235,17 +254,28 @@ void loop(){
 	while (radio.available()) {
 		uint8_t payload[4];
 		radio.read(payload, 4);
-		if (payload[0] == 0) {
-			lamp_off = 1;
-			printf("Lamp is now off.\n");
-			radio_send('R', 'O', 'F', 'F');
-			set_led(0.0);
-			decrease_light_output(1.0);
-		} else {
-			lamp_off = 0;
-			target_light_level = percent_to_light_level(payload[0]);
-			printf("Set target light level %d\n", target_light_level);
-			radio_send('R', '1', target_light_level & 0xFF, (target_light_level >> 8) & 0xFF);
+		switch (payload[0]) {
+			case 'L':
+				if (payload[1] == 0) {
+					lamp_off = 1;
+					printf("Lamp is now off.\n");
+					set_led(0.0);
+					decrease_light_output(1.0);
+					radio_send_light_target();
+				} else {
+					lamp_off = 0;
+					target_light_level = percent_to_light_level(payload[1]);
+					printf("Set target light level %d\n", target_light_level);
+					radio_send_light_target();
+				}
+				break;
+			case 'Q':
+				radio_send_temperature('N', get_temperature());
+				radio_send_light_target();
+				int light_level = get_light_level();
+				radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF);
+				radio_send_light_duty_cycle('N');
+				break;
 		}
 	}
 	
@@ -255,8 +285,6 @@ void loop(){
 		light_duty_cycle = payload/100.0;
 		set_led(light_duty_cycle);
 	}
-
-
 }
 
 

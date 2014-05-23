@@ -188,10 +188,10 @@ void loop(){
 
 	int light_level = get_light_level();
 	if (!thermal_override && !lamp_off /*&& millis() > next_lightlevel_check_at*/) {
-		if (light_level > target_light_level + 3) {
+		if (light_level > target_light_level + 5) {
 			increase_light_output();
 //			printf("Light at %d, high target %d, increasing duty cycle.\n", light_level, (int)(1.1 * (float)target_light_level));
-		} else if (light_level < target_light_level - 3) {
+		} else if (light_level < target_light_level - 5) {
 			decrease_light_output();
 //			printf("Light at %d, low target %d, decreasing duty cycle.\n", light_level, (int)(0.9 * (float)target_light_level));
 		}

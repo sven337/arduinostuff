@@ -1,5 +1,4 @@
 #include <SPI.h>
-#include <OneWire.h>
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
@@ -8,15 +7,13 @@ const int LED_DIM_PIN = 3; // [P3] "IRQ"
 const int CE_PIN = 8;
 const int CSN_PIN = 9;
 const int LDR_PIN = A0; // P1 A
-const int THERM_PIN = 5; // P2 D
+const int THERM_PIN = A1; // P2 A
 
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
 #define DIM_MAX 300.0
 
 RF24 radio(CE_PIN, CSN_PIN);
 const uint64_t pipe_address = 0xF0F0F0F0F2LL;
-
-OneWire ds(THERM_PIN);
 
 int lamp_off = 0;
 int target_light_level = 90;
@@ -101,60 +98,27 @@ void strobe()
 
 int get_temperature()
 {
-	uint8_t addr[8];
-	uint8_t data[12];
-	uint8_t present = 0;
-	uint8_t i;
+	// Integrated pullup has R1 = 20k
+	// We have Uth = Rth * E / (R1 + Rth)
+    // let V = Uth * 1023 / E value read by the ADC
+    // <=> V = 1023 * Rth / (R1 + Rth)
+	// solve in Rth :
+    // Rth 	=  R1 * V / (1023 - V)
 
+	// Once we have Rth, use beta parameter equation for NTC:
+	// T = Beta / ln (Rth / R0 * exp(-Beta/T0))
 
-	if (!ds.search(addr)) {
-		printf("No 1wire address.\n");
-		return 60000;
-	}
+	unsigned int adc = analogRead(THERM_PIN);
+	const unsigned long int R1 = 21900;
+	const float Beta = 4400.0;
+	const float Beta_R0 = 100000.0;
+	const float Beta_T0 = 25.0+273.0;
+	float Rth = R1 * adc / (float)(1023 - adc);
 
-	if (OneWire::crc8(addr, 7) != addr[7]) {
-		printf("Addr CRC error\n");
-		return 60000;
-	}
-
-	if (addr[0] != 0x28) {
-		printf("Addr[0] = %c, not 0x22\n", addr[0]);
-		return 60000;
-	}
-
-	ds.reset();
-	ds.select(addr);
-	ds.write(0x44, 1);
-	delay(1000);
-
-	present = ds.reset();
-	ds.select(addr);
-	ds.write(0xBE);
-
-/*	Serial.print("  Data = ");
-	Serial.print(present, HEX);
-	Serial.print(" ");*/
-	for ( i = 0; i < 9; i++) {           // we need 9 bytes
-		data[i] = ds.read();
-	}
-
-	// Convert the data to actual temperature
-	// because the result is a 16 bit signed integer, it should
-	// be stored to an "int16_t" type, which is always 16 bits
-	// even when compiled on a 32 bit processor.
-	int16_t raw = (data[1] << 8) | data[0];
-	byte cfg = (data[4] & 0x60);
-	// at lower res, the low bits are undefined, so let's zero them
-	if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
-	else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
-	else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
-	//// default is 12 bit resolution, 750 ms conversion time
-	float celsius = (float)raw / 16.0;
-
-	printf("Temperature is %d\n",(int)( celsius * 100));
-	ds.reset_search();
-
-	return (int)(celsius * 100.0);
+	float T = Beta / log(Rth / (Beta_R0 * exp(-Beta / Beta_T0))) - 273.0;
+//	printf("adc is %d, R1*adc is %ld, Rth is %lu, temp is %u\n", adc, R1*adc, (long unsigned int)Rth, (int)(T * 100.0));
+	
+	return (int)(T * 100.0);
 }
 
 void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
@@ -214,6 +178,10 @@ void setup(){
 	// Light level sensor
 	pinMode(LDR_PIN, INPUT);
 	digitalWrite(LDR_PIN, HIGH);
+
+	// Thermistor
+	pinMode(THERM_PIN, INPUT);
+//	digitalWrite(THERM_PIN, LOW);
 }
 
 void loop(){

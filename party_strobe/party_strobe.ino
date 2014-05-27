@@ -4,11 +4,9 @@
 #include "nRF24L01.h"
 #include "RF24.h"
 
-const int BUZZER_IN_PIN = 4; // P1
-const int ALARM_BUTTON = 17; // P3
-const int BUZZER_OUT_PIN = 3; // P3 analog 0
-const int CE_PIN = 8;
-const int CSN_PIN = 7;
+const int ON_OFF_PIN = 4; // P1 D
+const int BUTTON_PIN = 3; // P1 IRQ
+const int SPEED_PIN = A0; // P1 A
 
 const int R = 6;
 const int G = 9;
@@ -24,53 +22,51 @@ struct sequence {
 // "Worklist"
 enum sequence_type {
 	NONE = 0,
-	SUNRISE = 1,
-	SUNSET = 2,
-	STROBE = 3,
+	STROBE = 1,
+	SUNRISE = 2,
+	SUNSET = 3,
+	LAST_SEQ,
 } doing_sequence;
 
-static int sound_alarm = 0;
-
-static int got_buzzer_intr;
-static unsigned long buzzer_tstamps[2];
-static unsigned long sound_alarm_start;
 static unsigned long sequence_start_time;
-static unsigned long lights_out_at;
+
+static float sequence_speed_factor = 1.0;
+static long last_speed_factor_at;
+
+static int state_off = 0;
 
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
 #define ANALOG_RESOLUTION 8
 #define ANALOG_MAX ((1 << ANALOG_RESOLUTION) - 1)
 
-static int fast_sequence = 0;
-	
 static uint8_t led_current_r;
 static uint8_t led_current_g;
 static uint8_t led_current_b;
 
-RF24 radio(CE_PIN, CSN_PIN);
-const uint64_t address_pi = 0xF0F0F0F0F1LL;
+//RF24 radio(CE_PIN, CSN_PIN);
+//const uint64_t address_pi = 0xF0F0F0F0F1LL;
 
 // see https://svn.kapsi.fi/jpa/led-controller/sw/src/led_task.c
 const struct sequence sunrise_sequence[] = { 
 		{ 0,         0,    0,    0.01},
-		{ 300,       0,    0,    0.02}, // Dark blue
-		{ 900,  0.05,    0.02,    0.05},
-		{ 1500,  0.10,    0.02,    0.05}, // Sun begins to rise
-		{ 1800,  0.20,   0.10,    0.05},
-		{ 2100,   0.50,   0.12,    0.05}, // Yellowish
-		{ 2400,   0.60,   0.4,   0.2}, // White
-		{ 3600,   1.00,   0.65,   0.45}, // Bright white
+		{ 3,       0,    0,    0.02}, // Dark blue
+		{ 9,  0.05,    0.02,    0.05},
+		{ 15,  0.10,    0.02,    0.05}, // Sun begins to rise
+		{ 18,  0.20,   0.10,    0.05},
+		{ 21,   0.50,   0.12,    0.05}, // Yellowish
+		{ 24,   0.60,   0.4,   0.2}, // White
+		{ 36,   1.00,   0.65,   0.45}, // Bright white
 };
 
 const struct sequence sunset_sequence[] = { 
 		{ 0,   1.00,   0.65,   0.45}, // Bright white
-		{ 150,   0.60,   0.4,   0.2}, // White
-		{ 450,   0.50,   0.12,    0.05}, // Yellowish
-		{ 750,  0.20,   0.10,    0.05},
-		{ 900,  0.10,    0.02,    0.05}, // Sun begins to rise
-		{ 1050,  0.05,    0.02,    0.05},
-		{ 1200,       0,    0,    0.02}, // Dark blue
-		{ 1800,         0,    0,    0.01},
+		{ 2,   0.60,   0.4,   0.2}, // White
+		{ 5,   0.50,   0.12,    0.05}, // Yellowish
+		{ 8,  0.20,   0.10,    0.05},
+		{ 9,  0.10,    0.02,    0.05}, // Sun begins to rise
+		{ 10,  0.05,    0.02,    0.05},
+		{ 12,       0,    0,    0.02}, // Dark blue
+		{ 18,         0,    0,    0.01},
 };
 
 float bri(float in)
@@ -99,97 +95,9 @@ void set_led(float r, float g, float b)
 	analogWrite(B, b);
 }
 
-void buzzer_interrupt(void)
-{	
-	buzzer_tstamps[PCintPort::pinState] = millis();
-	if (PCintPort::pinState == HIGH)
-		got_buzzer_intr = 1;
-}
-
-/* Buzzer detect: 63 ms of silence, then 812 ms of silence +/- 2ms, then again */
-int buzzer_handle_silence_time(int time)
-{
-	static int step = 0;
-	int buzzer_wait_for = 1000;
-
-	// Ignore tiny delays: this isn't a silence!
-	if (time < 5) {
-		return 0;
-	}	
-
-	// If in an alarm right now, ignore
-	if (doing_sequence) {
-		return 0;
-	}
-
-	// Compute step expectation
-	switch(step) {
-		case 0:
-		case 2:
-			buzzer_wait_for = 63;
-			break;
-		case 1:
-		case 3:
-			buzzer_wait_for = 812;
-			break;
-	}
-
-	printf("Waiting for %d got %d\n", buzzer_wait_for, time);
-
-	if (abs(time - buzzer_wait_for) > 2) {
-		// Not the expected delay - reset sequence
-		step = 0;
-		return 0;
-	} 
-
-	step++;
-	Serial.println(step);
-	
-	if (step == 4) {
-		// Step 3 completed successfully, alarm detection is TRUE
-		step = 0;
-		Serial.println("ALARM NOW");
-		return 1;
-	}
-
-	return 0;
-}
-
-// Handle alarm situation
-void alarm_now(void)
-{
-	start_sequence(SUNRISE);
-
-	// Shut down the alarm on the clock
-	digitalWrite(ALARM_BUTTON, LOW);
-	delay(100);
-	digitalWrite(ALARM_BUTTON, HIGH);
-	
-}
-
-void ring_buzzer()
-{
-	int time = millis();
-	int silence = (time >> 7) & 0x01;
-	int val;
-
-	if (silence) {
-		val = 0;
-	} else {
-		val = 127;
-	}
-
-	analogWrite(BUZZER_OUT_PIN, val);
-	
-	if ((time - sound_alarm_start) >> 10 > 30) {
-		sound_alarm = 0;
-		analogWrite(BUZZER_OUT_PIN, 0);
-	}
-}
-
 void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
-	uint8_t payload[4] = { p0, p1, p2, p3 };
+/*	uint8_t payload[4] = { p0, p1, p2, p3 };
 	radio.stopListening();
 	delay(10);
 	radio.powerUp();
@@ -199,11 +107,12 @@ void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	else
 		Serial.println("send KO");
 	delay(1);
-	radio.startListening();
+	radio.startListening();*/
 }
 
 void start_sequence(int which)
 {
+//	printf("Starting sequence %d\n", which);
 	doing_sequence = (enum sequence_type) which;
 	sequence_start_time = millis();
 	radio_send('S', which, 0, 0);
@@ -212,16 +121,14 @@ void start_sequence(int which)
 void stop_sequence()
 {
 	doing_sequence = NONE;
-	lights_out_at = millis() + 4 * 60 * 1000L;
-	printf("Stopping sequence, shutting down lights at %ld, now is %ld\n", lights_out_at, millis());
+	set_led(0, 0, 0);
+//	printf("Stopping sequence\n");
 }
 
 float get_delay_in_sequence()
 {
 	float delay_in_sequence = (millis() - sequence_start_time) / 1000.0;
-	if (fast_sequence) {
-		delay_in_sequence *= 60;
-	}
+	delay_in_sequence *= sequence_speed_factor;
 	return delay_in_sequence;
 }
 
@@ -257,28 +164,58 @@ void led_sequence(const struct sequence *seq, int seq_size)
 	set_led(s->r + delta_r * pct, s->g + delta_g * pct, s->b + delta_b * pct);
 }
 
+void on_off_interrupt(void)
+{
+	state_off = PCintPort::pinState;
+}
+
+void button_interrupt(void)
+{
+//	Serial.println("Button interrupt");
+	if (doing_sequence == LAST_SEQ - 1)
+		stop_sequence();
+	else start_sequence(doing_sequence + 1);
+}
+
 void strobe()
 {
-	int i = 100;
+	static float next = 0.0;
+	static long next_at = 0;
 
-	while (i--) {
-		set_led(1.0, 1.0, 1.0);
-		delay(30);
-		set_led(0.0, 0.0, 0.0);
-		delay(30);
+	long now = millis();
+	int wait = constrain(13 + 15 / sequence_speed_factor, 1, 500);
+
+	float freq = 1 + sequence_speed_factor * 30;
+	wait = 1000.0 / freq;
+	printf("Wait = %d\n", wait);
+
+	if (now > next_at) {
+		set_led(next, next, next);
+		next_at = now + wait;
+		printf("Wait = %d\n", wait);
+		next = 1.0 - next;
+	} else {
+		if (next_at - now > wait)
+			next_at = now + wait;
 	}
 }
 
 void setup(){
 	//start serial connection
 	printf_begin();
-	Serial.begin(9600);
-	pinMode(BUZZER_IN_PIN, INPUT);
-	pinMode(ALARM_BUTTON, OUTPUT); 
-	pinMode(BUZZER_OUT_PIN, OUTPUT);
-	PCintPort::attachInterrupt(BUZZER_IN_PIN, &buzzer_interrupt, CHANGE);
-	digitalWrite(ALARM_BUTTON, HIGH);
-	radio.begin();
+	Serial.begin(57600);
+	pinMode(ON_OFF_PIN, INPUT);
+	digitalWrite(ON_OFF_PIN, HIGH);
+	pinMode(BUTTON_PIN, INPUT);
+	digitalWrite(BUTTON_PIN, HIGH);
+
+	pinMode(SPEED_PIN, INPUT);
+    digitalWrite(SPEED_PIN, HIGH);
+
+	printf("setup\n");
+	PCintPort::attachInterrupt(ON_OFF_PIN, &on_off_interrupt, CHANGE);
+	PCintPort::attachInterrupt(BUTTON_PIN, &button_interrupt, FALLING);
+	/*radio.begin();
 	radio.setRetries(15, 15);
 	radio.setAutoAck(true);
 	radio.setChannel(95);
@@ -289,24 +226,30 @@ void setup(){
 	radio.openWritingPipe(address_pi);
 	radio.startListening();
 
-	radio.printDetails();
+	radio.printDetails();*/
 
 	// fix PWM (LED flicker)
 	bitSet(TCCR1B, WGM12);
 
-	doing_sequence = NONE;
+	state_off = digitalRead(ON_OFF_PIN);
 }
 
 void loop(){
-	// If buzzer is ringing, detect if this is an alarm
-	if (got_buzzer_intr) {
-		long time = buzzer_tstamps[1] - buzzer_tstamps[0];
 
-		if (buzzer_handle_silence_time(time)) {
-			alarm_now();
-		}
+	if (last_speed_factor_at - millis() > 500) {
+	   last_speed_factor_at = millis();
+   	   float val = analogRead(SPEED_PIN) / 1024.0;
+	   val = - (33000.0/36000.0) * val / (val - 1);
+	   val = constrain(val, 0.0, 1.0);
+//	   Serial.println(val);
+	   sequence_speed_factor = val;
 
-		got_buzzer_intr = 0;
+	   printf("Sequence %d\n", doing_sequence);
+	}	   
+
+	if (state_off) {
+		set_led(0, 0, 0);
+		return;
 	}
 
 	// Should we do the sunrise sequence?
@@ -321,20 +264,13 @@ void loop(){
 			strobe();
 			break;
 		case NONE:
-			if (lights_out_at && millis() > lights_out_at) {
-				set_led(0, 0, 0);
-				lights_out_at = 0;
-			}
 			//fall through to save 2 bytes of program memory :)
+			set_led(0, 0, 0);
 		default:
 			doing_sequence = NONE;
 	}
 
-	// Should we emit a sound?... not with my broken buzzer
-	if (sound_alarm) {
-		ring_buzzer();
-	}
-
+/*
 	while (radio.available()) {
 		Serial.println("Radio available");
 		uint8_t payload[4];
@@ -352,7 +288,7 @@ void loop(){
 			set_led(payload[0]/255.0, payload[1]/255.0, payload[2]/255.0);
 			radio_send('L', led_current_r, led_current_g, led_current_b);
 		}
-	}
+	}*/
 }
 
 

@@ -7,6 +7,7 @@
 const int ON_OFF_PIN = 4; // P1 D
 const int BUTTON_PIN = 3; // P1 IRQ
 const int SPEED_PIN = A0; // P1 A
+const int THERM_PIN = A5;
 
 const int R = 6;
 const int G = 9;
@@ -31,9 +32,12 @@ enum sequence_type {
 static unsigned long sequence_start_time;
 
 static float sequence_speed_factor = 1.0;
-static long last_speed_factor_at;
+static unsigned long last_speed_factor_at;
+
+static unsigned long last_therm_check_at;
 
 static int state_off = 0;
+static int thermal_override = 0;
 
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
 #define ANALOG_RESOLUTION 8
@@ -171,7 +175,6 @@ void on_off_interrupt(void)
 
 void button_interrupt(void)
 {
-//	Serial.println("Button interrupt");
 	if (doing_sequence == LAST_SEQ - 1)
 		stop_sequence();
 	else start_sequence(doing_sequence + 1);
@@ -200,6 +203,31 @@ void strobe()
 	}
 }
 
+int get_temperature()
+{
+	// Integrated pullup has R1 = 20k (no it does not)
+	// We have Uth = Rth * E / (R1 + Rth)
+    // let V = Uth * 1023 / E value read by the ADC
+    // <=> V = 1023 * Rth / (R1 + Rth)
+	// solve in Rth :
+    // Rth 	=  R1 * V / (1023 - V)
+
+	// Once we have Rth, use beta parameter equation for NTC:
+	// T = Beta / ln (Rth / R0 * exp(-Beta/T0))
+
+	unsigned int adc = analogRead(THERM_PIN);
+	const unsigned long int R1 = 40000;
+	const float Beta = 4400.0;
+	const float Beta_R0 = 100000.0;
+	const float Beta_T0 = 25.0+273.0;
+	float Rth = R1 * adc / (float)(1023 - adc);
+
+	float T = Beta / log(Rth / (Beta_R0 * exp(-Beta / Beta_T0))) - 273.0;
+//	printf("adc is %d, R1*adc is %ld, Rth is %lu, temp is %u\n", adc, R1*adc, (long unsigned int)Rth, (int)(T * 100.0));
+	
+	return (int)(T * 100.0);
+}
+
 void setup(){
 	//start serial connection
 	printf_begin();
@@ -211,6 +239,9 @@ void setup(){
 
 	pinMode(SPEED_PIN, INPUT);
     digitalWrite(SPEED_PIN, HIGH);
+
+	pinMode(THERM_PIN, INPUT);
+	digitalWrite(THERM_PIN, HIGH);
 
 	printf("setup\n");
 	PCintPort::attachInterrupt(ON_OFF_PIN, &on_off_interrupt, CHANGE);
@@ -236,7 +267,7 @@ void setup(){
 
 void loop(){
 
-	if (last_speed_factor_at - millis() > 500) {
+	if (millis() - last_speed_factor_at > 500) {
 	   last_speed_factor_at = millis();
    	   float val = analogRead(SPEED_PIN) / 1024.0;
 	   val = - (33000.0/36000.0) * val / (val - 1);
@@ -247,7 +278,22 @@ void loop(){
 	   printf("Sequence %d\n", doing_sequence);
 	}	   
 
-	if (state_off) {
+	if (millis() - last_therm_check_at > 5000) {
+		last_therm_check_at = millis();
+		int temperature = get_temperature();
+		printf("Temp is %d\n", temperature);
+		if (temperature > 5500) {
+			printf("Thermal alarm\n");
+			thermal_override = 1;
+		} else if (temperature < 4000) {
+			if (thermal_override) {
+				printf("Stand down from thermal alarm\n");
+			}
+			thermal_override = 0;
+		}
+	}
+
+	if (state_off || thermal_override) {
 		set_led(0, 0, 0);
 		return;
 	}
@@ -264,8 +310,8 @@ void loop(){
 			strobe();
 			break;
 		case NONE:
-			//fall through to save 2 bytes of program memory :)
 			set_led(0, 0, 0);
+			break;
 		default:
 			doing_sequence = NONE;
 	}

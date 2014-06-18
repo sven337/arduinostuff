@@ -41,6 +41,10 @@ static unsigned long lights_out_at;
 #define ANALOG_MAX ((1 << ANALOG_RESOLUTION) - 1)
 
 static int fast_sequence = 0;
+	
+static uint8_t led_current_r;
+static uint8_t led_current_g;
+static uint8_t led_current_b;
 
 RF24 radio(CE_PIN, CSN_PIN);
 const uint64_t address_pi = 0xF0F0F0F0F1LL;
@@ -81,10 +85,17 @@ void set_led(float r, float g, float b)
 	g = bri(g);
 	b = bri(b);
 
-	analogWrite(R, r * ANALOG_MAX);
-	analogWrite(G, g * ANALOG_MAX);
-	analogWrite(B, b * ANALOG_MAX);
-	printf("Set LEDs to %d %d %d\n", (int)(r*100), (int)(g*100), (int)(b*100));
+	r *= ANALOG_MAX;
+	g *= ANALOG_MAX;
+	b *= ANALOG_MAX;
+
+	led_current_r = r;
+	led_current_g = g;
+	led_current_b = b;
+
+	analogWrite(R, r);
+	analogWrite(G, g);
+	analogWrite(B, b);
 }
 
 void buzzer_interrupt(void)

@@ -40,7 +40,7 @@ static unsigned long lights_out_at;
 #define ANALOG_RESOLUTION 8
 #define ANALOG_MAX ((1 << ANALOG_RESOLUTION) - 1)
 
-#define FAST_SUNRISE 0
+static int fast_sequence = 0;
 
 RF24 radio(CE_PIN, CSN_PIN);
 const uint64_t address_pi = 0xF0F0F0F0F1LL;
@@ -188,14 +188,20 @@ void stop_sequence()
 	printf("Stopping sequence, shutting down lights at %ld, now is %ld\n", lights_out_at, millis());
 }
 
+float get_delay_in_sequence()
+{
+	float delay_in_sequence = (millis() - sequence_start_time) / 1000.0;
+	if (fast_sequence) {
+		delay_in_sequence *= 60;
+	}
+	return delay_in_sequence;
+}
+
 void led_sequence(const struct sequence *seq, int seq_size)
 {
 	const struct sequence *s = NULL;
 	int cur_seq;
-	float delay_in_sequence = (millis() - sequence_start_time) / 1000.0;
-#if FAST_SUNRISE
-	delay_in_sequence *= 60;
-#endif
+	float delay_in_sequence = get_delay_in_sequence();
 	float pct;
 	float delta_r, delta_g, delta_b;
 

@@ -27,7 +27,9 @@ enum sequence_type {
 	SUNRISE = 1,
 	SUNSET = 2,
 	STROBE = 3,
+	FULLPOWER = 4,
 } doing_sequence;
+
 static int sound_alarm = 0;
 
 static int got_buzzer_intr;
@@ -321,6 +323,9 @@ void loop(){
 			break;
 		case STROBE:
 			strobe();
+			break;
+		case FULLPOWER:
+			set_led(1, 1, 1);
 			break;
 		case NONE:
 			if (lights_out_at && millis() > lights_out_at) {

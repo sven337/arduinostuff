@@ -261,13 +261,20 @@ void led_sequence(const struct sequence *seq, int seq_size)
 
 void strobe()
 {
-	int i = 1000;
+	static float next = 0.0;
+	static long next_at = 0;
 
-	while (i--) {
-		set_led(1.0, 1.0, 1.0);
-		delay(30);
-		set_led(0.0, 0.0, 0.0);
-		delay(30);
+	long now = millis();
+	int wait = 30;
+
+	if (now > next_at) {
+		set_led(next, next, next);
+		next_at = now + wait;
+		printf("Wait = %d\n", wait);
+		next = 1.0 - next;
+	} else {
+		if (next_at - now > wait)
+			next_at = now + wait;
 	}
 }
 

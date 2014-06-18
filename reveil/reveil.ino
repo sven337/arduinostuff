@@ -186,10 +186,26 @@ void ring_buzzer()
 	}
 }
 
+void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
+{
+	uint8_t payload[4] = { p0, p1, p2, p3 };
+	radio.stopListening();
+	delay(10);
+	radio.powerUp();
+	bool ok = radio.write(payload, 4);
+	if (ok) 
+		Serial.println("send ok");
+	else
+		Serial.println("send KO");
+	delay(1);
+	radio.startListening();
+}
+
 void start_sequence(int which)
 {
 	doing_sequence = (enum sequence_type) which;
 	sequence_start_time = millis();
+	radio_send('S', which, 0, 0);
 }
 
 void stop_sequence()
@@ -325,10 +341,20 @@ void loop(){
 		Serial.println("Radio available");
 		uint8_t payload[4];
 		radio.read(payload, 4);
-		printf("Received payload %d\n", payload[0], payload[1], payload[2], payload[3]);
-		start_sequence(payload[0]);
+		// Sequence
+		if (payload[0] == 'S') {
+			start_sequence(payload[1]);
+		} else if (payload[0] == 'F') {
+			fast_sequence = !fast_sequence;
+			radio_send('F', fast_sequence, 0, 0);
+		} else if (payload[0] == 'L') {
+			radio_send('L', led_current_r, led_current_g, led_current_b);
+			radio_send('S', doing_sequence, (int)get_delay_in_sequence() & 0xFF, ((int)get_delay_in_sequence() >> 8) & 0xFF);
+		} else if (payload[0] == 'V') {
+			set_led(payload[0]/255.0, payload[1]/255.0, payload[2]/255.0);
+			radio_send('L', led_current_r, led_current_g, led_current_b);
+		}
 	}
-
 }
 
 

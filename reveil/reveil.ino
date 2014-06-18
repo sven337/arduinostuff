@@ -240,7 +240,6 @@ void setup(){
 	//start serial connection
 	printf_begin();
 	Serial.begin(9600);
-	printf("0\n");
 	pinMode(BUZZER_IN_PIN, INPUT);
 	pinMode(ALARM_BUTTON, OUTPUT); 
 	pinMode(BUZZER_OUT_PIN, OUTPUT);
@@ -249,12 +248,14 @@ void setup(){
 	radio.begin();
 	radio.powerDown();
 	radio.setRetries(15, 15);
-	radio.setAutoAck(false);
 	radio.setChannel(95);
+	radio.setCRCLength(RF24_CRC_16);
 	radio.setPayloadSize(sizeof(unsigned long));
 	radio.setPALevel(RF24_PA_MAX);
 	radio.setDataRate(RF24_250KBPS);
+ 	radio.setAutoAck(true);
 	radio.openReadingPipe(1, address_pi);
+	radio.openWritingPipe(address_pi);
 	radio.startListening();
 
 	radio.printDetails();

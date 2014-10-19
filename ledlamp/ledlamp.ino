@@ -21,7 +21,8 @@ float light_duty_cycle = 1.0;
 bool thermal_override = 0;
 
 unsigned long next_temperature_check_at;
-unsigned long next_lightlevel_check_at;
+unsigned long next_lightlevel_send_at;
+unsigned long fade_to_black_start_date;
 
 float bri(float in)
 {
@@ -40,7 +41,7 @@ int percent_to_light_level(int pct)
 
 void set_led(float val)
 {
-//	val = bri(val);
+	val = bri(val);
 	analogWrite(LED_DIM_PIN, val * 255);
 	printf("Set LED to %d%%\n", (int)(val*100));
 }
@@ -52,7 +53,10 @@ int get_light_level()
 
 void radio_send_light_duty_cycle(uint8_t event_type)
 {
+	if (light_duty_cycle == 0 || light_duty_cycle == 100 || millis() > next_lightlevel_send_at) {
 		radio_send('D', event_type, (uint8_t)(light_duty_cycle * 100.0), 0);
+		next_lightlevel_send_at = millis() + 500;
+	}
 }
 
 int change_light_output(float pct)
@@ -93,6 +97,29 @@ void strobe()
 		delay(30);
 		set_led(0.0);
 		delay(30);
+	}
+}
+
+void stop_lamp()
+{
+	lamp_off = 1;
+	printf("Lamp is now off.\n");
+	set_led(0.0);
+	decrease_light_output(1.0);
+	radio_send_light_target();
+}
+
+void fadeout()
+{
+	if (millis() >= fade_to_black_start_date + 15000) {
+		stop_lamp();
+		fade_to_black_start_date = 0;
+		return;
+	}
+	
+	unsigned long remaining = fade_to_black_start_date + 15000 - millis();
+	if (remaining < 10000) {
+		set_led((float)(remaining / 10000.0));
 	}
 }
 
@@ -187,7 +214,9 @@ void setup(){
 void loop(){
 
 	int light_level = get_light_level();
-	if (!thermal_override && !lamp_off /*&& millis() > next_lightlevel_check_at*/) {
+	if (fade_to_black_start_date) {
+		fadeout();
+	} else if (!thermal_override && !lamp_off) {
 		if (light_level > target_light_level + 5) {
 			increase_light_output();
 //			printf("Light at %d, high target %d, increasing duty cycle.\n", light_level, (int)(1.1 * (float)target_light_level));
@@ -195,8 +224,7 @@ void loop(){
 			decrease_light_output();
 //			printf("Light at %d, low target %d, decreasing duty cycle.\n", light_level, (int)(0.9 * (float)target_light_level));
 		}
-//		next_lightlevel_check_at = millis() + 100;
-	}
+	} 
 
 	if (millis() > next_temperature_check_at) {
 		int temp = get_temperature();
@@ -225,11 +253,7 @@ void loop(){
 		switch (payload[0]) {
 			case 'L':
 				if (payload[1] == 0) {
-					lamp_off = 1;
-					printf("Lamp is now off.\n");
-					set_led(0.0);
-					decrease_light_output(1.0);
-					radio_send_light_target();
+					stop_lamp();
 				} else {
 					lamp_off = 0;
 					target_light_level = percent_to_light_level(payload[1]);
@@ -238,11 +262,17 @@ void loop(){
 				}
 				break;
 			case 'Q':
+				{
+				int light_level = get_light_level();
 				radio_send_temperature('N', get_temperature());
 				radio_send_light_target();
-				int light_level = get_light_level();
 				radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF);
 				radio_send_light_duty_cycle('N');
+				}
+				break;
+			case 'F':
+				printf("Fading out to black...\n");
+				fade_to_black_start_date = millis();
 				break;
 		}
 	}

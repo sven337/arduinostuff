@@ -41,21 +41,22 @@ enum ramp_name {
 	RISE_START,
 	RISE_END = 7,
 	FADEOUT_START,
-	FADEOUT_END,
+	FADEOUT_END = 10,
 };
 
-static uint8_t doing_ramp
-;
+static uint8_t doing_ramp;
+
 const struct ramp LED_ramps[] = {
 		{ 1, 	   0, 	   0, 	   0, 0 }, //OFF
-		{ 500,	   0,	   0,	0.02, 2 }, //RISE_START
-		{ 500, 	0.04,	0.02,	0.04, 3	},
-		{ 500,	 0.1,	0.02,	0.04, 4	},
+		{ 1,	0.02,	0.01,	   0, 2 }, //RISE_START
+		{ 200,  0.15,	   0,	0.08, RISE_END	},
+		{ 500,	 0.1,	0.05,	0.02, 4	},
 		{ 500,	 0.2,	 0.1,	0.04, 5	},
-		{ 2000,	 0.5,	0.15,	0.05, 6	},
-		{ 1000,	0.55,	0.35,	0.15, 7	},
-		{ 1000,	 1.0,   0.65,	0.45, RISE_END }, // RISE_END	
-		{ 2000, 0.15,	   0,   0.15, FADEOUT_END }, // FADEOUT_START
+		{ 2500,	 0.5,	0.25,	0.04, 6	},
+		{ 1500,	 0.7,	0.35,	0.04, RISE_END },
+		{ 1000,	   1,   0.35,	0.08, RISE_END }, // RISE_END	
+		{ 1000, 0.15,	   0,   0.13, 9 }, // FADEOUT_START
+		{ 1000, 0.15,	   0,   0.08, FADEOUT_END },
 		{ 4000,    0,	   0,      0, FADEOUT_END }, // FADEOUT_END
 };
 
@@ -63,7 +64,7 @@ uint8_t bri(float in)
 {
 	// Maps linear 0 -> 1.0 to logarithmic 0.0 -> 1.0
 	// Magic value is ln(2) 
-	return 255.0 * (exp(0.6931471805599453 * in) - 1.0);
+	return (uint8_t)(255.0 * (exp(0.6931471805599453 / 255.0 * in) - 1.0));
 }
 
 void set_led(long r, long g, long b) //fixedpoint!
@@ -72,13 +73,15 @@ void set_led(long r, long g, long b) //fixedpoint!
 	led_g = g;
 	led_b = b;
 
-	printf("set led %lu %lu %lu\n", F2I(r), F2I(g), F2I(b));
-/*	analogWrite(R, bri(r>>23));
-	analogWrite(G, bri(g>>23));
-	analogWrite(B, bri(b>>23));*/
-	analogWrite(R, F2I(r) & 0xFF);
-	analogWrite(G, F2I(g) & 0xFF);
-	analogWrite(B, F2I(b) & 0xFF);
+	uint8_t my_r, my_g, my_b;
+#define BRI_CORRECT(X) (bri(F2I(X)) & 0xFF)
+	my_r = BRI_CORRECT(r);
+	my_g = BRI_CORRECT(g);
+	my_b = BRI_CORRECT(b);
+	printf("set led to %d %d %d\n", my_r, my_g, my_b);
+	analogWrite(R, my_r);
+	analogWrite(G, my_g);
+	analogWrite(B, my_b);
 }
 
 void pir_interrupt(void)

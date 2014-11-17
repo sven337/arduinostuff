@@ -8,8 +8,8 @@
 #include "printf.h"
 
 /** FTDI 
-  6 4
-  7 5
+  6 5
+  4 7
  */
 static const int LED_ROUGE = 6;
 static const int LED_JAUNE = 4;
@@ -18,17 +18,24 @@ static const int REED = 7;
 static unsigned long pulse = 0;
 static unsigned long old_pulse = 0;
 
+// Define this to disable power down mode and spit out debug info on serial
+//#define DEBUG_OUTPUT
+
+#ifndef DEBUG_OUTPUT
 #define printf (void)
+#endif
 
 // Set up nRF24L01 radio on SPI bus plus pins 9 & 10
 RF24 radio(9, 8);
 
 const uint64_t address_pi = 0xF0F0F0F0F0LL;
 
+#ifndef DEBUG_OUTPUT
 ISR(WDT_vect)
 {
 	Sleepy::watchdogEvent();
 }
+#endif
 
 static void check_radio(void)
 {
@@ -40,21 +47,16 @@ static void check_radio(void)
 	// Have we successfully transmitted?
 	if (tx) {
 		printf("Send:OK\n\r");
+		led(LED_ROUGE, false);
 	}
 	// Have we failed to transmit?
 	if (fail) {
 		printf("Send:Failed\n\r");
+		led(LED_ROUGE, true);
 	}
-	// Transmitter can power down for now, because
-	// the transmission is done.
-	if ((tx || fail)) {
-		//		radio.powerDown();
-		led(LED_ROUGE, false);
-	}
+
 	// Did we receive a message?
 	if (rx) {
-	//	radio.read(&message_count, sizeof(message_count));
-	//	printf("Ack:%lu\n\r", message_count);
 		;
 	}
 	led(LED_BLEUE, false);
@@ -76,8 +78,10 @@ static void led(int led, bool on)
 
 void setup(void)
 {
-	// Serial.begin(57600);
-	// printf_begin();
+#ifdef DEBUG_OUTPUT
+	Serial.begin(57600);
+	printf_begin();
+#endif
 	pinMode(REED, INPUT);
 	digitalWrite(REED, true);
 	pinMode(LED_ROUGE, OUTPUT);
@@ -109,27 +113,24 @@ void setup(void)
 
 void radio_send_int(unsigned long data)
 {
-	led(LED_ROUGE, true);
+	led(LED_JAUNE, true);
 	radio.powerUp();
 	delayMicroseconds(5000);
 	radio.startWrite(&data, sizeof(unsigned long));
-//	radio.write(&data, sizeof(unsigned long));
-//	radio.powerDown();
-	led(LED_ROUGE, false);
-	//delay(250);
+	led(LED_JAUNE, false);
 }
 
 void loop(void)
 {
-	led(LED_JAUNE, true);
 	if (pulse != old_pulse) {
 		// Pulse
-		//printf("Pulse number %d...\n", pulse);
+		printf("Pulse number %d...\n", pulse);
 		old_pulse = pulse;
 		radio_send_int(old_pulse);
 //		PCintPort::attachInterrupt(REED, &reed_interrupt, FALLING);
 		led(LED_BLEUE, false);
 	}
-	led(LED_JAUNE, false);
+#ifndef DEBUG_OUTPUT
 	Sleepy::powerDown();
+#endif
 }

@@ -1,0 +1,51 @@
+  abcde fghij
+1
+2
+3
+..
+30
+
+
+
+Arduino: 3d -> 14h
+
+
+3d  TX
+4d  RX
+5d  RST
+6d  GND
+7d  D2
+8d  D3
+9d  D4
+10d D5
+11d D6
+12d D7
+13d D8
+14d D9
+
+3h  VIN
+4h  GND
+5h  RST
+6h  +5V
+7h  A3
+8h  A2
+9h  A1
+10h A0
+11h D13
+12h D12
+13h D11
+14h D10
+
++ not on breadboard: ISP & A7 A6 GND A4 A5
+
+Cable to nRF24:
+
+22d 23d 26d 27d
+MO  SCK GND VCC
+No  Ma  --  Vert
+D11	D13
+
+22f 23f 26f 27f
+IRQ MI  CSN CE
+Red	Yel	Bl  Or
+D3  D12 D8  D9

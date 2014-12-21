@@ -1,11 +1,12 @@
 #include <SPI.h>
+#include <JeeLib.h>
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
 
 // Define this to enable analog comparator IRQ
 // if not, report light value every second over radio
-#define ANALOG_COMPARATOR_IRQ 0
+#define ANALOG_COMPARATOR_IRQ 1
 
 const int CE_PIN = 8;
 const int CSN_PIN = 9;
@@ -27,6 +28,14 @@ volatile boolean triggered = false;
 unsigned int triggered_counter = 0;
 
 static long next_ldr_report_at;
+
+#if ANALOG_COMPARATOR_IRQ
+ISR(WDT_vect)
+{
+	Sleepy::watchdogEvent();
+}
+
+#endif
 
 ISR (ANALOG_COMP_vect)
   {
@@ -99,10 +108,28 @@ void loop()
 	if (triggered) {
 		printf("Triggered %d times, at %d seconds\n", triggered_counter, millis() / 1000);
 		radio_send('I', 'R', 'Q', 0);
+		radio_send('I', 'R', 'Q', 0);
+		radio_send('I', 'R', 'Q', 0);
+		radio_send('I', 'R', 'Q', 0);
 		triggered = false;
 		delay(100);
 		ACSR |= _BV(ACIE);
 	}
+
+	while (radio.available()) {
+		uint8_t payload[4];
+		radio.read(payload, 4);
+		switch (payload[0]) {
+			case 'Q': 
+				{
+				int light_level = get_light_level();
+				radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF); 
+				}
+			break;
+		}
+	}
+
+//	Sleepy::powerDown();
 #else
 	if (millis() > next_ldr_report_at) {
 		next_ldr_report_at = millis() + 1000;
@@ -111,6 +138,8 @@ void loop()
 		radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF); 
 	}
 #endif
+
+
 }
 
 

@@ -11,13 +11,18 @@
 const int CE_PIN = 8;
 const int CSN_PIN = 9;
 
+const int LED1 = 4;
+const int LED2 = 5;
+
+static unsigned long last_trigger_at;
+
 #if ANALOG_COMPARATOR_IRQ
 // See http://www.gammon.com.au/forum/?id=11916 for analog comparator
-const int LDR_PIN = 6; //P3D
+const int COMPARATOR_LDR_PIN = 6; //P3D
 // const int REF_PIN = 7; //P4D
-#else
-const int LDR_PIN = A2; //P3A
 #endif
+
+const int LDR_PIN = A2; //P3A
 
 const int NOTIFY_LED_PIN = 5; //P2D
 
@@ -44,10 +49,14 @@ ISR (ANALOG_COMP_vect)
 
   // debounce
   ACSR &= ~_BV(ACIE);
+
+  last_trigger_at = millis();
+  digitalWrite(LED1, 0);
+  digitalWrite(LED2, 0);
   }
 
 
-void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
+int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
 	uint8_t payload[4] = { p0, p1, p2, p3 };
 	radio.stopListening();
@@ -61,6 +70,12 @@ void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	delay(10);
 	radio.startListening();
 	delay(10);
+
+	if (!ok) {
+		return -1;
+	}
+
+	return 0;
 }
 
 
@@ -93,12 +108,20 @@ void setup(){
 	ACSR =  _BV (ACI)     // (Clear) Analog Comparator Interrupt Flag
         | _BV (ACIE)    // Analog Comparator Interrupt Enable
         | _BV (ACIS1)  // ACIS1, ACIS0 - trigger on rising edge
-		| _BV (ACIS0);
-#else
-	// Light level sensor
-	pinMode(LDR_PIN, INPUT);
+	;//	| _BV (ACIS0);
 #endif
 
+	// Light level sensor
+	pinMode(LDR_PIN, INPUT);
+
+	pinMode(LED1, OUTPUT);
+	pinMode(LED2, OUTPUT);
+	digitalWrite(LED1, 0);
+	digitalWrite(LED2, 0);
+	delay(1000);
+	digitalWrite(LED2, 1);
+	delay(1000);
+	digitalWrite(LED1, 1);
 }
 
 void loop() 
@@ -107,10 +130,10 @@ void loop()
 #if ANALOG_COMPARATOR_IRQ
 	if (triggered) {
 		printf("Triggered %d times, at %d seconds\n", triggered_counter, millis() / 1000);
-		radio_send('I', 'R', 'Q', 0);
-		radio_send('I', 'R', 'Q', 0);
-		radio_send('I', 'R', 'Q', 0);
-		radio_send('I', 'R', 'Q', 0);
+		if (radio_send('I', 'R', 'Q', 0)) {
+			radio_send('I', 'R', 'Q', 0);
+			radio_send('I', 'R', 'Q', 0);
+		}
 		triggered = false;
 		delay(100);
 		ACSR |= _BV(ACIE);
@@ -139,6 +162,12 @@ void loop()
 	}
 #endif
 
+	if (millis() - last_trigger_at > 5000) {
+		digitalWrite(LED1, 1);
+	} 
+	if (millis() - last_trigger_at > 3600000) {
+		digitalWrite(LED2, 1);
+	}
 
 }
 

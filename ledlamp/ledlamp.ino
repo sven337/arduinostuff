@@ -41,7 +41,7 @@ int percent_to_light_level(int pct)
 
 void set_led(float val)
 {
-	val = bri(val);
+//	val = bri(val);
 	analogWrite(LED_DIM_PIN, val * 255);
 	printf("Set LED to %d%%\n", (int)(val*100));
 }

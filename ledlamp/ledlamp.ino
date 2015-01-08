@@ -53,7 +53,7 @@ int get_light_level()
 
 void radio_send_light_duty_cycle(uint8_t event_type)
 {
-	if (light_duty_cycle == 0 || light_duty_cycle == 100 || millis() > next_lightlevel_send_at) {
+	if (light_duty_cycle == 0.0 || light_duty_cycle == 1.0 || millis() > next_lightlevel_send_at) {
 		radio_send('D', event_type, (uint8_t)(light_duty_cycle * 100.0), 0);
 		next_lightlevel_send_at = millis() + 500;
 	}

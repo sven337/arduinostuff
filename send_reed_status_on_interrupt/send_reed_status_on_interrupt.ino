@@ -11,36 +11,35 @@
   6 5
   4 7
  */
-static const int LED_ROUGE = 6;
+static const int LED_ROUGE = 15; // P2 A
 static const int LED_JAUNE = 4;
 static const int LED_BLEUE = 5;
 static const int REED = 7;
-static unsigned long pulse = 0;
-static unsigned long old_pulse = 0;
+static const int BATTERY_PIN = A2;
+static uint16_t pulse = 0;
+static uint16_t old_pulse = 0;
+
+static unsigned long reed_interrupt_at = 0;
+static unsigned long last_ping_at = 0;
+static unsigned long transmit_failed_at = 0;
 
 // Define this to disable power down mode and spit out debug info on serial
-//#define DEBUG_OUTPUT
-
-#ifndef DEBUG_OUTPUT
-#define printf (void)
-#endif
 
 // Set up nRF24L01 radio on SPI bus plus pins 9 & 10
 RF24 radio(9, 8);
 
 const uint64_t address_pi = 0xF0F0F0F0F0LL;
 
-#ifndef DEBUG_OUTPUT
 ISR(WDT_vect)
 {
 	Sleepy::watchdogEvent();
 }
-#endif
+
+void (*reboot)(void) = 0;
 
 static void check_radio(void)
 {
 	bool tx, fail, rx;
-	led(LED_BLEUE, true);
 	radio.whatHappened(tx, fail, rx);
 	uint32_t message_count = 0;
 
@@ -48,18 +47,20 @@ static void check_radio(void)
 	if (tx) {
 		printf("Send:OK\n\r");
 		led(LED_ROUGE, false);
+		transmit_failed_at = 0;
 	}
 	// Have we failed to transmit?
 	if (fail) {
 		printf("Send:Failed\n\r");
 		led(LED_ROUGE, true);
+		if (!transmit_failed_at)
+			transmit_failed_at = millis();
 	}
 
 	// Did we receive a message?
 	if (rx) {
 		;
 	}
-	led(LED_BLEUE, false);
 	radio.powerDown();
 }
 
@@ -67,7 +68,7 @@ void reed_interrupt(void)
 {
 	led(LED_BLEUE, true);
 	pulse++;
-//	PCintPort::detachInterrupt(REED);
+	reed_interrupt_at = millis();
 	delay(10);
 }
 
@@ -76,12 +77,32 @@ static void led(int led, bool on)
 	digitalWrite(led, on);
 }
 
+void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
+{
+	uint8_t payload[4] = { p0, p1, p2, p3 };
+	led(LED_JAUNE, true);
+	radio.powerUp();
+	delayMicroseconds(5000);
+	radio.startWrite(&payload, 4);
+	led(LED_JAUNE, false);
+	last_ping_at = millis();
+}
+
+
+void radio_send_pulse(uint16_t pulse)
+{
+	radio_send('P', (pulse >> 8) & 0xFF, pulse & 0xFF, 0);
+}
+
+void radio_send_bat(uint16_t bat, uint8_t type)
+{
+	radio_send('B', type, (bat >> 8) & 0xFF, bat & 0xFF);
+}
+
 void setup(void)
 {
-#ifdef DEBUG_OUTPUT
 	Serial.begin(57600);
 	printf_begin();
-#endif
 	pinMode(REED, INPUT);
 	digitalWrite(REED, true);
 	pinMode(LED_ROUGE, OUTPUT);
@@ -93,7 +114,6 @@ void setup(void)
 
 	radio.begin();
 	radio.powerDown();
-	led(LED_BLEUE, false);
 	radio.setRetries(15, 15);
 	radio.setAutoAck(true);
 	radio.setChannel(95);
@@ -102,22 +122,18 @@ void setup(void)
 	radio.setDataRate(RF24_250KBPS);
 
 	radio.openWritingPipe(address_pi);
-	led(LED_JAUNE, false);
 
 	radio.printDetails();
 	attachInterrupt(1, check_radio, FALLING);
 	PCintPort::attachInterrupt(REED, &reed_interrupt, FALLING);
+	delay(500);
 	led(LED_ROUGE, false);
-
-}
-
-void radio_send_int(unsigned long data)
-{
-	led(LED_JAUNE, true);
-	radio.powerUp();
-	delayMicroseconds(5000);
-	radio.startWrite(&data, sizeof(unsigned long));
+	delay(500);
 	led(LED_JAUNE, false);
+	delay(500);
+	led(LED_BLEUE, false);
+
+	radio_send_bat(analogRead(BATTERY_PIN), 'N');
 }
 
 void loop(void)
@@ -126,11 +142,34 @@ void loop(void)
 		// Pulse
 		printf("Pulse number %d...\n", pulse);
 		old_pulse = pulse;
-		radio_send_int(old_pulse);
-//		PCintPort::attachInterrupt(REED, &reed_interrupt, FALLING);
+
+		radio_send_pulse(old_pulse);
+		Sleepy::loseSomeTime(10000);
+	}
+
+	if (millis() > reed_interrupt_at + 3000) {
 		led(LED_BLEUE, false);
 	}
-#ifndef DEBUG_OUTPUT
-	Sleepy::powerDown();
-#endif
+
+	Serial.flush();
+	Sleepy::loseSomeTime(65535);
+	Sleepy::loseSomeTime(65535);
+	Sleepy::loseSomeTime(65535);
+	if (millis() > last_ping_at + 600000L) {
+		// Check battery level
+		uint16_t battery_level = analogRead(BATTERY_PIN);
+		if (battery_level < 560) {
+			// Bat level < 3.6V = low bat
+			radio_send_bat(battery_level, 'L');
+		}
+
+		// Ping receiver to confirm we're alive
+		printf("Pinging at %lu\n", millis());
+		radio_send_bat(battery_level, 'N');
+
+		// If transmission has been failing for one hour, try to reboot
+		if (transmit_failed_at && millis() - transmit_failed_at  > 3600000L) {
+			reboot();
+		}
+	}
 }

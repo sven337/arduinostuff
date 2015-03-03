@@ -154,16 +154,12 @@ void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
 	uint8_t payload[4] = { p0, p1, p2, p3 };
 	radio.stopListening();
-	delay(10);
-	radio.powerUp();
 	bool ok = radio.write(payload, 4);
 	if (ok) 
 		Serial.println("send ok");
 	else
 		Serial.println("send KO");
-	delay(10);
 	radio.startListening();
-	delay(10);
 }
 
 void radio_send_temperature(uint8_t type, int temperature)

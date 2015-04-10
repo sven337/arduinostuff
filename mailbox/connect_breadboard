@@ -49,3 +49,12 @@ D11	D13
 IRQ MI  CSN CE
 Red	Yel	Bl  Or
 D3  D12 D8  D9
+
+2*4 cable:
+IRQ MI  Vcc CE
+Red Yel Gr Or
+D3  D12    D9
+
+MO GND  SCK CSN
+No  -   Ma Bl
+D11     D13 D8

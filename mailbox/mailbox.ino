@@ -1,5 +1,7 @@
 #include <SPI.h>
 #include <JeeLib.h>
+#include <avr/sleep.h>
+#include <util/atomic.h>
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
@@ -8,11 +10,11 @@
 // if not, report light value every second over radio
 #define ANALOG_COMPARATOR_IRQ 1
 
-const int CE_PIN = 8;
-const int CSN_PIN = 9;
+const int CE_PIN = 9;
+const int CSN_PIN = 8;
 
-const int LED1 = 4;
-const int LED2 = 5;
+const int LED_YELLOW = 5;
+const int LED_RED = 4;
 
 static unsigned long last_trigger_at;
 
@@ -23,8 +25,6 @@ const int COMPARATOR_LDR_PIN = 6; //P3D
 #endif
 
 const int LDR_PIN = A2; //P3A
-
-const int NOTIFY_LED_PIN = 5; //P2D
 
 RF24 radio(CE_PIN, CSN_PIN);
 const uint64_t pipe_address = 0xF0F0F0F0F3LL;
@@ -44,15 +44,13 @@ ISR(WDT_vect)
 
 ISR (ANALOG_COMP_vect)
   {
-  triggered = true;
-  triggered_counter++;
-
-  // debounce
-  ACSR &= ~_BV(ACIE);
+	if (!triggered) {
+		triggered = true;
+		triggered_counter++;
+	}
 
   last_trigger_at = millis();
-  digitalWrite(LED1, 0);
-  digitalWrite(LED2, 0);
+  digitalWrite(LED_YELLOW, 1);
   }
 
 
@@ -105,23 +103,31 @@ void setup(){
 
 #if ANALOG_COMPARATOR_IRQ
 	ADCSRB = 0;           // (Disable) ACME: Analog Comparator Multiplexer Enable
-	ACSR =  _BV (ACI)     // (Clear) Analog Comparator Interrupt Flag
-        | _BV (ACIE)    // Analog Comparator Interrupt Enable
+	ACSR =  /*_BV (ACI)     // (Clear) Analog Comparator Interrupt Flag
+        | */_BV (ACIE)    // Analog Comparator Interrupt Enable
         | _BV (ACIS1)  // ACIS1, ACIS0 - trigger on rising edge
-	;//	| _BV (ACIS0);
+		| _BV (ACIS0);
+	DIDR1 = _BV(AIN1D) | _BV(AIN0D); // Disable digital input  on D6/D7 
 #endif
 
 	// Light level sensor
 	pinMode(LDR_PIN, INPUT);
 
-	pinMode(LED1, OUTPUT);
-	pinMode(LED2, OUTPUT);
-	digitalWrite(LED1, 0);
-	digitalWrite(LED2, 0);
-	delay(1000);
-	digitalWrite(LED2, 1);
-	delay(1000);
-	digitalWrite(LED1, 1);
+	pinMode(LED_YELLOW, OUTPUT);
+	pinMode(LED_RED, OUTPUT);
+	digitalWrite(LED_YELLOW, 1);
+	digitalWrite(LED_RED, 1);
+	delay(200);
+	digitalWrite(LED_RED, 0);
+	delay(200);
+	digitalWrite(LED_RED, 1);
+	delay(200);
+	digitalWrite(LED_RED, 0);
+	delay(200);
+	digitalWrite(LED_RED, 1);
+	delay(200);
+	digitalWrite(LED_RED, 0);
+	digitalWrite(LED_YELLOW, 0);
 }
 
 void loop() 
@@ -130,44 +136,78 @@ void loop()
 #if ANALOG_COMPARATOR_IRQ
 	if (triggered) {
 		printf("Triggered %d times, at %d seconds\n", triggered_counter, millis() / 1000);
-		if (radio_send('I', 'R', 'Q', 0)) {
-			radio_send('I', 'R', 'Q', 0);
-			radio_send('I', 'R', 'Q', 0);
+		bool fail = true;
+		int retries = 3;
+		while (retries-- && fail) {
+			if (!radio_send('I', 'R', 'Q', 0)) {
+				fail = false;
+			}
 		}
+
+		if (fail) { 
+			digitalWrite(LED_RED, 1);
+		} else {
+			digitalWrite(LED_RED, 0);
+			digitalWrite(LED_YELLOW, 1);
+			delay(500);
+			digitalWrite(LED_YELLOW, 0);
+			delay(500);
+			digitalWrite(LED_YELLOW, 1);
+			delay(500);
+			digitalWrite(LED_YELLOW, 0);
+		}
+		
 		triggered = false;
-		delay(100);
-		ACSR |= _BV(ACIE);
+		// Right after we were triggered, go to power down (not just idle) for 3 hours.
+/*		Serial.flush();
+		ACSR &= ~_BV(ACIE);
+		int i = 360;
+		while (i--) {
+			Sleepy::loseSomeTime(32768);
+		}
+		ACSR |= _BV(ACIE);*/
 	}
 
 	while (radio.available()) {
 		uint8_t payload[4];
 		radio.read(payload, 4);
 		switch (payload[0]) {
-			case 'Q': 
-				{
-				int light_level = get_light_level();
-				radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF); 
-				}
+			case 'Q':
+			    radio_send('P', 'O', 'N', 'G');	
 			break;
 		}
 	}
+	
+	if (millis() - last_trigger_at > 5000) {
+		digitalWrite(LED_YELLOW, 0);
+		digitalWrite(LED_RED, 0);
+	} 
 
-//	Sleepy::powerDown();
+	Serial.flush();
+	set_sleep_mode(SLEEP_MODE_IDLE);
+	sleep_enable();
+	sleep_cpu();
+	sleep_disable();
+
 #else
+
 	if (millis() > next_ldr_report_at) {
 		next_ldr_report_at = millis() + 1000;
 		int light_level = get_light_level();
 		printf("Mailbox light %d\n", light_level);
-		radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF); 
+		if (radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF)) {
+			digitalWrite(LED_RED, 1);
+		} else {
+			digitalWrite(LED_YELLOW, 1);
+			delay(500);
+			digitalWrite(LED_YELLOW, 0);
+			delay(500);
+			digitalWrite(LED_YELLOW, 1);
+			delay(500);
+			digitalWrite(LED_YELLOW, 0);
+		}
 	}
 #endif
-
-	if (millis() - last_trigger_at > 5000) {
-		digitalWrite(LED1, 1);
-	} 
-	if (millis() - last_trigger_at > 3600000) {
-		digitalWrite(LED2, 1);
-	}
 
 }
 

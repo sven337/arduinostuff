@@ -158,14 +158,17 @@ void loop()
 		}
 		
 		triggered = false;
-		// Right after we were triggered, go to power down (not just idle) for 3 hours.
-/*		Serial.flush();
+		// Right after we were triggered, go to power down (not just idle) for 3 hours, unless we got a radio packet
+		Serial.flush();
 		ACSR &= ~_BV(ACIE);
 		int i = 360;
 		while (i--) {
 			Sleepy::loseSomeTime(32768);
+			if (radio.available()) {
+				break;
+			}
 		}
-		ACSR |= _BV(ACIE);*/
+		ACSR |= _BV(ACIE);
 	}
 
 	while (radio.available()) {

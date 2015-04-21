@@ -12,7 +12,7 @@
 
 const int CE_PIN = 9;
 const int CSN_PIN = 8;
-
+const int BATTERY_PIN = A3;
 const int LED_YELLOW = 5;
 const int LED_RED = 4;
 
@@ -33,6 +33,8 @@ volatile boolean triggered = false;
 unsigned int triggered_counter = 0;
 
 static long next_ldr_report_at;
+
+static unsigned long last_ping_at = 0;
 
 #if ANALOG_COMPARATOR_IRQ
 ISR(WDT_vect)
@@ -57,17 +59,14 @@ ISR (ANALOG_COMP_vect)
 int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
 	uint8_t payload[4] = { p0, p1, p2, p3 };
-	radio.stopListening();
-	delay(10);
+	last_ping_at = millis();
 	radio.powerUp();
+	delayMicroseconds(5000);
 	bool ok = radio.write(payload, 4);
 	if (ok) 
 		Serial.println("send ok");
 	else
 		Serial.println("send KO");
-	delay(10);
-	radio.startListening();
-	delay(10);
 
 	if (!ok) {
 		return -1;
@@ -80,6 +79,11 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 int get_light_level()
 {
 	return analogRead(LDR_PIN);
+}
+
+void radio_send_bat(uint16_t bat, uint8_t type)
+{
+	radio_send('B', type, (bat >> 8) & 0xFF, bat & 0xFF);
 }
 
 void setup(){
@@ -158,33 +162,25 @@ void loop()
 		}
 		
 		triggered = false;
-		// Right after we were triggered, go to power down (not just idle) for 3 hours, unless we got a radio packet
+		// Right after we were triggered, go to power down (not just idle) for 3 hours.
 		Serial.flush();
 		ACSR &= ~_BV(ACIE);
 		int i = 360;
 		while (i--) {
 			Sleepy::loseSomeTime(32768);
-			if (radio.available()) {
-				break;
-			}
 		}
 		ACSR |= _BV(ACIE);
 	}
 
-	while (radio.available()) {
-		uint8_t payload[4];
-		radio.read(payload, 4);
-		switch (payload[0]) {
-			case 'Q':
-			    radio_send('P', 'O', 'N', 'G');	
-			break;
-		}
-	}
-	
 	if (millis() - last_trigger_at > 5000) {
 		digitalWrite(LED_YELLOW, 0);
 		digitalWrite(LED_RED, 0);
 	} 
+
+	if (millis() > last_ping_at + 3600000) {
+		uint16_t battery_level = analogRead(BATTERY_PIN);
+		radio_send_bat(battery_level, 'N');
+	}
 
 	Serial.flush();
 	set_sleep_mode(SLEEP_MODE_IDLE);

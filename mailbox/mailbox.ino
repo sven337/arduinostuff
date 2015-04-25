@@ -168,6 +168,7 @@ void loop()
 		int i = 360;
 		while (i--) {
 			Sleepy::loseSomeTime(32768);
+			digitalWrite(LED_RED, 0);
 		}
 		ACSR |= _BV(ACIE);
 	}

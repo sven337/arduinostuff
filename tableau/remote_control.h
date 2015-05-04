@@ -6,7 +6,6 @@
 // These are the codes from the IR remote control that was sold with an RGB LED controller 
 struct remote_key {
    	uint32_t code;
-	const char *name;
 	void (*cb)(void *);
 	void *cbdata;
 };
@@ -22,22 +21,22 @@ COLOR(red,	  255,	 0,	 0);
 COLOR(green,	0,	255,	 0);
 COLOR(blue,	 	0,	 0,	 255);
 COLOR(white,   255,255,	 255);
-COLOR(orange,  255,0xA5,    0);
+COLOR(orange,  255,0xB3,    0);
 COLOR(green2,	 0,	 0,	 0);
-COLOR(blue2,	 0,	 0,	 0);
+COLOR(blue2,	 0,	 128,	 255);
 COLOR(beige,	 0,	 0,	 0);
-COLOR(orange2,	 0,	 0,	 0);
-COLOR(turquoise,	 0,	 0,	 0);
-COLOR(violet,	 0,	 0,	 0);
+COLOR(orange2, 255,0xC6,	 0);
+COLOR(turquoise,	 0,	 0xBC,	 0x89);
+COLOR(violet,	 128,	 0,	 255);
 COLOR(beige2,	 0,	 0,	 0);
-COLOR(orange3,	 0,	 0,	 0);
-COLOR(turquoise2 ,	 0,	 0,	 0);
-COLOR(brown,	 0,	 0,	 0);
+COLOR(orange3,199, 154,	 0);
+COLOR(turquoise2 ,	 0,	 0x8C,	 0x67);
+COLOR(brown,	 102,	 0,	 32);
 COLOR(cyan,	 0,	 255,	 255);
-COLOR(yellow,	 255,	 255,	 0);
-COLOR(turquoise3,	 0,	 0,	 0);
-COLOR(pink,	 0,	 0,	 0);
-COLOR(cyan2,	 0,	 0,	 0);
+COLOR(yellow,	 255,	 200,	 0);
+COLOR(turquoise3,	 81,	 127,	 115);
+COLOR(pink,	 255,	 0,	 255);
+COLOR(cyan2,	 163,	 250,	 255);
 
 void remote_cb_light(void *bool_increase);
 void remote_cb_play(void *bool_play);
@@ -50,8 +49,8 @@ void remote_cb_strobeperiod(void *bool_decrease);
 void remote_cb_jump(void *int_number);
 void remote_cb_fade(void *int_number);
 
-#define C(CODE, FUNC, CB, DATA) { 0xFF##CODE, FUNC, &remote_cb_##CB, (void *)DATA }
-#define CC(CODE, FUNC) { 0xFF##CODE, #FUNC, &remote_cb_color, (void *)&constant_color_##FUNC }
+#define C(CODE, NAME, CB, DATA) { 0xFF##CODE, &remote_cb_##CB, (void *)DATA }
+#define CC(CODE, NAME) { 0xFF##CODE, &remote_cb_color, (void *)&constant_color_##NAME }
 const struct remote_key remote_codes[NROWS][NCOLS] = {
 /* codes seen by the TSOP4838 sensor */
 	    { C(3AC5, "light up", light, 1),	C(BA45, "light down", light, 0),	C(827D, "play", play, 1),	    C(02FD, "off", play, 0), },
@@ -67,7 +66,5 @@ const struct remote_key remote_codes[NROWS][NCOLS] = {
 		{ C(20DF, "jump3", jump, 3), 	C(A05F, "jump7", jump, 7), 		C(609F, "fade3", fade, 3),	C(E01F, "fade7", fade, 7), },
 
 };
-
-const struct remote_key unknown_key = { 0, "UNKNOWN", NULL, NULL };
 
 

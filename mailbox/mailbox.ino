@@ -36,6 +36,8 @@ static long next_ldr_report_at;
 
 static unsigned long last_ping_at = 0;
 
+int init_failed = 0;
+
 #if ANALOG_COMPARATOR_IRQ
 ISR(WDT_vect)
 {
@@ -105,6 +107,15 @@ void setup(){
 
 	radio.printDetails();
 
+	if ((radio.getPALevel() != RF24_PA_MAX) ||
+		(radio.getDataRate() != RF24_250KBPS) ||
+		(radio.getCRCLength() != RF24_CRC_16) || 
+		(radio.getChannel() != 95)) {
+		// failed to initialize radio
+		init_failed = 1;
+	}
+
+
 #if ANALOG_COMPARATOR_IRQ
 	ADCSRB = 0;           // (Disable) ACME: Analog Comparator Multiplexer Enable
 	ACSR =  /*_BV (ACI)     // (Clear) Analog Comparator Interrupt Flag
@@ -136,16 +147,33 @@ void setup(){
 
 void loop() 
 {
+	int red = 0;
+	while (init_failed) {
+			digitalWrite(LED_RED, red);
+			red = !red;
+			// Christmas tree if init failed
+			digitalWrite(LED_YELLOW, 1);
+			delay(100);
+			digitalWrite(LED_YELLOW, 0);
+			delay(100);
+			digitalWrite(LED_YELLOW, 1);
+			delay(100);
+			digitalWrite(LED_YELLOW, 0);
+			delay(100);
+	}
 
 #if ANALOG_COMPARATOR_IRQ
 	if (triggered) {
 		printf("Triggered %d times, at %d seconds\n", triggered_counter, millis() / 1000);
 		bool fail = true;
 		int retries = 3;
+		uint16_t battery_level = analogRead(BATTERY_PIN);
+
 		while (retries-- && fail) {
 			if (!radio_send('I', 'R', 'Q', 0)) {
 				fail = false;
 			}
+			radio_send_bat(battery_level, 'N');
 		}
 
 		if (fail) { 
@@ -162,13 +190,15 @@ void loop()
 		}
 		
 		triggered = false;
-		// Right after we were triggered, go to power down (not just idle) for 3 hours.
+		// Right after we were triggered, go to power down (not just idle) for ~12hours.
 		Serial.flush();
 		ACSR &= ~_BV(ACIE);
-		int i = 360;
+		Sleepy::loseSomeTime(32768);
+		digitalWrite(LED_RED, 0);
+		digitalWrite(LED_YELLOW, 0);
+		int i = 1318;
 		while (i--) {
 			Sleepy::loseSomeTime(32768);
-			digitalWrite(LED_RED, 0);
 		}
 		ACSR |= _BV(ACIE);
 	}

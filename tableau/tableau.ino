@@ -1,21 +1,27 @@
-#include <SPI.h>
-#include <PinChangeInt.h>
+#include <Arduino.h>
+#include <EEPROM.h>
 #include <IRremote.h>
 #include "printf.h" 
 #include "remote_control.h"
 
+/* Pins */
 const int DIAG_LED_PIN = 7; // P3 D
-
 const int R = 9;
 const int G = 5;
 const int B = 6;
 const int RECV_PIN = 11;
 
-IRrecv irrecv(RECV_PIN);
+/* Working mode */
+enum mode {
+	OFF = 0,
+	RAMP,
+	PAUSE,
+	FIXED,
+	STROBE,
+	SAVE_CONFIRM,
+} current_mode;
 
-
-static unsigned long presence_detected_at;
-
+/* Ramps */
 typedef signed long fixedpoint;
 
 #define I2F(I) (I << 20)
@@ -29,54 +35,73 @@ static fixedpoint delta_r;
 static fixedpoint delta_g;
 static fixedpoint delta_b;
 
-static const struct remote_key *last_remote_command;
-
 static unsigned long ramp_start_time;
 static unsigned long ramp_last_step;
 
 enum ramp_name {
-	OFF,
-	FADE7,
+	FADE7 = 1,
 	FADE7_END = 7,
 	ERROR = FADE7_END + 1,
 	ERROR_END = ERROR + 3,
+	SUNRISE = ERROR_END + 1,
+	SUNSET = SUNRISE + 8,
 };
 
 static uint8_t doing_ramp;
-static uint8_t ramp_is_paused;
 
 struct ramp {
-	int time;
+	long duration;
 	float r;
 	float g;
 	float b;
-	int next_ramp;
+	uint8_t next_ramp;
 };
 
 const int dur = 5000; 
 
 const struct ramp LED_ramps[] = {
 		{ 1, 	   0, 	   0, 	   0, 0 }, //OFF
-		{ dur,	 1.0,	   0,	   0, 2 }, //FADE7
-		{ dur/2,	 0.0,	1.0,	   0, 3 },
-		{ dur,	 0.0,	0.0,	 1.0, 4 },
-		{ dur,	 1.0,	1.0,	 0.0, 5 },
-		{ dur,	 1.0,	0.0,	 1.0, 6 },
-		{ dur,	 0.0,	1.0,	 1.0, 7 },
-		{ dur,	 1.0,	1.0,	 1.0, 1 }, //FADE7_END
-		{ 1,	   0,	  0,       0, ERROR+1 },     //ERROR
+		{ dur,	 1.0,	   0,	   0, FADE7+1 }, //FADE7
+		{ dur/2,	 0.0,	1.0,	   0, FADE7+2 },
+		{ dur,	 0.0,	0.0,	 1.0, FADE7+3 },
+		{ dur,	 1.0,	1.0,	 0.0, FADE7+4 },
+		{ dur,	 1.0,	0.0,	 1.0, FADE7+5 },
+		{ dur,	 0.0,	1.0,	 1.0, FADE7+6 },
+		{ dur,	 1.0,	1.0,	 1.0, FADE7 }, //FADE7_END
+		{ 0,	   0,	  0,       0, ERROR+1 },     //ERROR
 		{ 1000,	   0,	  0,       0, ERROR+2 },     //ERROR
-		{ 1,	 1.0,	  0,       0, ERROR+3 },     //ERROR
+		{ 0,	 1.0,	  0,       0, ERROR+3 },     //ERROR
 		{ 1000,	 1.0,	  0,       0, ERROR },     //ERROR_END
+		{ 0,         0,    0,    0.01, SUNRISE+1},    // SUNRISE
+		{ 300000,       0,    0,    0.02, SUNRISE+2}, // Dark blue
+		{ 900000,  0.05,    0.02,    0.05, SUNRISE+3},
+		{ 1500000,  0.10,    0.02,    0.05, SUNRISE+4}, // Sun begins to rise
+		{ 1800000,  0.20,   0.10,    0.05, SUNRISE+5},
+		{ 2100000,   0.50,   0.12,    0.05, SUNRISE+6}, // Yellowish
+		{ 2400000,   0.60,   0.4,   0.2, SUNRISE+7}, // White
+		{ 3600000,   1.00,   0.65,   0.45, OFF}, // Bright white
+		{ 0000,   1.00,   0.65,   0.45, SUNSET+1}, // SUNSET
+		{ 150000,   0.60,   0.4,   0.2, SUNSET+2}, // White
+		{ 450000,   0.50,   0.12,    0.05, SUNSET+3}, // Yellowish
+		{ 750000,  0.20,   0.10,    0.05, SUNSET+4},
+		{ 900000,  0.10,    0.02,    0.05, SUNSET+5}, // Sun begins to rise
+		{ 1050000,  0.05,    0.02,    0.05, SUNSET+6},
+		{ 1200000,       0,    0,    0.02, SUNSET+7}, // Dark blue
+		{ 1800000,         0,    0,    0.01, OFF},
 
 };
 
+
 /* Strobe */
-static uint8_t strobe_mode;
-static fixedpoint strobe_target_r = 0;
-static fixedpoint strobe_target_g = 0;
-static fixedpoint strobe_target_b = 0;
+static uint8_t strobe_target_r = 0;
+static uint8_t strobe_target_g = 0;
+static uint8_t strobe_target_b = 0;
 int strobe_period = 500;
+
+/* Remote control */
+
+static const struct remote_key *last_remote_command;
+IRrecv irrecv(RECV_PIN);
 
 /* --End of data definition-- */
 
@@ -113,14 +138,15 @@ void start_ramp(int which)
 	ramp_last_step = ramp_start_time;
 
 	// Compute per-millisecond deltas
-	delta_r = (I2F((int32_t)(255.0 * r->r)) - led_r) / r->time;
-	delta_g = (I2F((int32_t)(255.0 * r->g)) - led_g) / r->time;
-	delta_b = (I2F((int32_t)(255.0 * r->b)) - led_b) / r->time;
+	delta_r = (I2F((int32_t)(255.0 * r->r)) - led_r) / r->duration;
+	delta_g = (I2F((int32_t)(255.0 * r->g)) - led_g) / r->duration;
+	delta_b = (I2F((int32_t)(255.0 * r->b)) - led_b) / r->duration;
 
-	printf("Starting ramp %d deltas are r %ld g %ld b %ld\n", doing_ramp, delta_r, delta_g, delta_b);
+	printf("Start ramp %d deltas r %ld g %ld b %ld\n", doing_ramp, delta_r, delta_g, delta_b);
+	current_mode = RAMP;
 	if (which == OFF) {
-		// OFF is a special ramp that shuts everything right away.
-		set_led(0, 0, 0);
+		// OFF shouldn't be used, instead set current_mode to OFF
+		start_ramp(ERROR);
 	}
 }
 
@@ -129,7 +155,7 @@ void led_ramp(void)
 	const struct ramp *r = &LED_ramps[doing_ramp];
 	const unsigned long now = millis();
 	unsigned long delay_in_ramp = now - ramp_start_time;
-	if (delay_in_ramp > r->time) {
+	if (delay_in_ramp > r->duration) {
 		// Ramp is done, move on
 		if (r->next_ramp != doing_ramp) {
 			set_led(I2F((uint32_t)(255.0 * r->r)), I2F((uint32_t)(255.0 * r->g)), I2F((uint32_t)(255.0 * r->b)));
@@ -141,7 +167,6 @@ void led_ramp(void)
 	unsigned long this_step_duration = now - ramp_last_step;
 	ramp_last_step = now;
 
-//	printf("step duration %ld\n", this_step_duration);
 	set_led(led_r + this_step_duration * delta_r, led_g + this_step_duration * delta_g, led_b + this_step_duration * delta_b);
 }
 
@@ -150,7 +175,7 @@ void strobe(void)
 	if ((millis() / strobe_period) & 1) {
 		set_led(0, 0, 0);
 	} else {
-		set_led(strobe_target_r, strobe_target_g, strobe_target_b);
+		set_led(I2F((uint32_t)strobe_target_r), I2F((uint32_t)strobe_target_g), I2F((uint32_t)strobe_target_b));
 	}
 }
 
@@ -165,7 +190,7 @@ const struct remote_key *lookup_code(uint32_t key)
 			}
 		}
 	}
-	return &unknown_key;
+	return NULL;
 }
 
 
@@ -181,53 +206,65 @@ void setup(){
 	// fix PWM (LED flicker)
 	bitSet(TCCR1B, WGM12);
 
-	printf("Ready!\n");
+	current_mode = OFF;
 }
 
 void loop(){
 	decode_results results;
 	
 	uint32_t code;
-	const char *name;
 	if (irrecv.decode(&results)) {
 		code = results.value;
 		if (code == 0xFFFFFFFF) { 
-			// "repeat" code
-			Serial.println("XXX implement repeat");
+			// "repeat" code XXX must implement
 		}
 
 		last_remote_command = lookup_code(code);
-		printf("Command %s code %x\n", last_remote_command->name, code);
-
-		if (last_remote_command->cb) {
+		if (last_remote_command && last_remote_command->cb) {
 			last_remote_command->cb(last_remote_command->cbdata);
 		}
 		irrecv.resume(); // Receive the next value
 	}
 
-	if (doing_ramp && !ramp_is_paused) {
-		led_ramp();
-	} else if (strobe_mode) {
-		strobe();
+	switch (current_mode) {
+		case OFF:
+			if (led_r != 0 && led_g != 0 || led_b != 0) {
+				set_led(0, 0, 0);
+			}
+			break;
+		case RAMP:
+			led_ramp();
+			break;
+		case PAUSE:
+		case FIXED:
+		case SAVE_CONFIRM:
+			break;
+		case STROBE:
+			strobe();
+			break;
+		default:
+			start_ramp(ERROR);
 	}
 }
 
 void remote_cb_light(void *bool_increase)
 { printf("Implement me %s\n", __FUNCTION__); return; }
+
 void remote_cb_play(void *bool_play)
 {
 	int start = (int)bool_play;
 	if (!start) {
 		// OFF button
-		start_ramp(OFF);
+		current_mode = OFF;
+		set_led(0, 0, 0);
 		return;
 	} 
 
 	// play/pause button
-	if (doing_ramp) {
-		ramp_is_paused = !ramp_is_paused;
+	if (current_mode == OFF || current_mode == PAUSE) {
+		current_mode = RAMP;
 	} else {
-		start_ramp(FADE7);
+		current_mode = PAUSE;
 	}
 }
 
@@ -237,32 +274,67 @@ void remote_cb_color(void *struct_color)
 	// Retrieve color, stop current ramp, set leds
 	const struct color *c = (const struct color *)struct_color;
 
-	start_ramp(OFF);
-	printf("Got color %d %d %d\n", (int)c->r, (int)c->g, (int)c->b);
+	current_mode = FIXED;
 	set_led(I2F((int32_t)c->r), I2F((int32_t)c->g), I2F((int32_t)c->b));
 	
 }
 
 void remote_cb_NULL(void *arg)
 	{ printf("Implement me %s\n", __FUNCTION__); return; }
+
 void remote_cb_diy(void *int_number)
-	{ printf("Implement me %s\n", __FUNCTION__); return; }
+{
+	int slot = (int)int_number;
+	struct color col;
+
+	if (current_mode == SAVE_CONFIRM) {
+		// Confirming save: write current color to slot
+		col.r = F2I(led_r);
+		col.g = F2I(led_g);
+		col.b = F2I(led_b);
+		EEPROM.put(slot * sizeof(col), col);
+		set_led(led_r, led_g, led_b);
+	} else {
+		if (current_mode == FIXED) {
+			// Ask for confirmation to save the color?
+			current_mode = SAVE_CONFIRM;
+		} else {
+			// Recall fixed color from slot
+			current_mode = FIXED;
+			EEPROM.get(slot * sizeof(col), col);
+			led_r = I2F((uint32_t)col.r);
+			led_g = I2F((uint32_t)col.g);
+			led_b = I2F((uint32_t)col.b);
+			set_led(led_r, led_g, led_b);
+		}
+	}
+}
+
 void remote_cb_strobe(void *none)
 {
 	// Toggle strobe mode (flash between current color and black)
-	strobe_mode = !strobe_mode;
-	strobe_target_r = led_r;
-	strobe_target_g = led_g;
-	strobe_target_b = led_b;
+	if (current_mode == STROBE) {
+		current_mode = OFF;
+	} else {
+		current_mode = STROBE;
+	}
+	strobe_target_r = F2I(led_r);
+	strobe_target_g = F2I(led_g);
+	strobe_target_b = F2I(led_b);
+	printf("strobe target r %d g %d b %d\n", strobe_target_r, strobe_target_g, strobe_target_b);
 	strobe_period = 500;
 }
 
 void remote_cb_strobeperiod(void *bool_decrease)
 {
 	// Change strobing period
-	int decrease = (int)bool_decrease;
+	uint8_t decrease = *(uint8_t *)(&bool_decrease);
 	if (decrease) {
-		strobe_period -= 50;
+		if (strobe_period >= 100) {
+			strobe_period -= 50;
+		} else {
+			strobe_period -= 5;
+		}
 	} else {
 		strobe_period += 50;
 	}
@@ -273,7 +345,7 @@ void remote_cb_jump(void *int_number)
 
 void remote_cb_fade(void *int_number)
 {
-	int variant = (int)int_number;
+	uint8_t variant = *(uint8_t *)(&int_number);
 	if (variant == 7) {
 		start_ramp(FADE7);
 	} else {
@@ -283,5 +355,35 @@ void remote_cb_fade(void *int_number)
 }
 
 void remote_cb_colortweak(void *char_color)
-{ printf("Implement me %s\n", __FUNCTION__); return; }
+{ 
+	char cmd = *(char *)(&char_color);
+	fixedpoint add = I2F((uint32_t)10);
+	current_mode = FIXED;
+
+	switch (cmd) {
+		case 'R':
+			led_r += add;
+			break;
+		case 'r':
+			led_r -= add;
+			break;
+		case 'G':
+			led_g += add;
+			break;
+		case 'g':
+			led_g -= add;
+			break;
+		case 'B':
+			led_b += add;
+			break;
+		case 'b':
+			led_b -= add;
+			break;
+		default:
+			start_ramp(ERROR);
+			return;
+	}
+
+	set_led(led_r, led_g, led_b);
+}
 

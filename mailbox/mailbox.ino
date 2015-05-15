@@ -17,6 +17,7 @@ const int LED_YELLOW = 5;
 const int LED_RED = 4;
 
 static unsigned long last_trigger_at;
+boolean ignore_next_trigger; // when  re-enabling the analog comparator after a deep sleep, sometimes it seems to retrigger immediately even at 4AM with no ambient light. So cheat by ignoring it.
 
 #if ANALOG_COMPARATOR_IRQ
 // See http://www.gammon.com.au/forum/?id=11916 for analog comparator
@@ -47,15 +48,20 @@ ISR(WDT_vect)
 #endif
 
 ISR (ANALOG_COMP_vect)
-  {
+{
+	if (ignore_next_trigger) {
+		ignore_next_trigger = false;
+		return;
+	}
+
 	if (!triggered) {
 		triggered = true;
 		triggered_counter++;
 	}
 
-  last_trigger_at = millis();
-  digitalWrite(LED_YELLOW, 1);
-  }
+	last_trigger_at = millis();
+	digitalWrite(LED_YELLOW, 1);
+}
 
 
 int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
@@ -196,10 +202,12 @@ void loop()
 		Sleepy::loseSomeTime(32768);
 		digitalWrite(LED_RED, 0);
 		digitalWrite(LED_YELLOW, 0);
-		int i = 1318;
+//		int i = 1318;
+		int i = 131;
 		while (i--) {
 			Sleepy::loseSomeTime(32768);
 		}
+		ignore_next_trigger = true;
 		ACSR |= _BV(ACIE);
 	}
 

@@ -1,4 +1,5 @@
 #include <SPI.h>
+#include <dht.h>
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
@@ -8,12 +9,14 @@ const int CE_PIN = 8;
 const int CSN_PIN = 9;
 const int LDR_PIN = A0; // P1 A
 const int THERM_PIN = A1; // P2 A
-
+const int DHT_PIN = 7;
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
 #define DIM_MAX 300.0
 
 RF24 radio(CE_PIN, CSN_PIN);
 const uint64_t pipe_address = 0xF0F0F0F0F2LL;
+
+dht DHT;
 
 int lamp_off = 0;
 int target_light_level = 90;
@@ -25,6 +28,7 @@ bool thermal_override = 0;
 unsigned long next_temperature_check_at;
 unsigned long next_lightlevel_send_at;
 unsigned long fade_to_black_start_date;
+unsigned long next_ambient_temp_report_at;
 
 int percent_to_light_level(int pct)
 {
@@ -176,9 +180,14 @@ void radio_send_light_target()
 	}
 }
 
+void radio_send_ambient(uint8_t deg, uint8_t hum)
+{
+	radio_send('A', 'N', deg, hum);
+}
+
 void setup(){
 	printf_begin();
-	Serial.begin(9600);
+	Serial.begin(57600);
 
 	// Radio init
 	radio.begin();
@@ -241,6 +250,40 @@ void loop(){
 			printf("End thermal alarm.");
 			thermal_override = 0;
 		}
+	}
+
+	if (millis() > next_ambient_temp_report_at) {
+		// Report ambiant temperature & humidity from DHT11
+		next_ambient_temp_report_at = millis() + 15L * 60L * 1000L;
+
+		int chk = DHT.read11(DHT_PIN);
+		switch (chk) {
+			case DHTLIB_OK:
+				printf("DHT OK\n");
+				break;
+			case DHTLIB_ERROR_CHECKSUM: 
+				Serial.print("Checksum error,\n"); 
+				break;
+			case DHTLIB_ERROR_TIMEOUT: 
+				Serial.print("Time out error,\n"); 
+				break;
+			case DHTLIB_ERROR_CONNECT:
+				Serial.print("Connect error,\n");
+				break;
+			case DHTLIB_ERROR_ACK_L:
+				Serial.print("Ack Low error,\n");
+				break;
+			case DHTLIB_ERROR_ACK_H:
+				Serial.print("Ack High error,\n");
+				break;
+			default:
+				printf("DHT XXX\n");
+		}
+
+		int deg = DHT.temperature;
+		int hum = DHT.humidity;
+		printf("Ambient temp %d humidity %d%%\n", deg, hum);
+		radio_send_ambient(deg, hum);
 	}
 
 	while (radio.available()) {

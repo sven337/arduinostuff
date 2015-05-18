@@ -202,8 +202,8 @@ void loop()
 		Sleepy::loseSomeTime(32768);
 		digitalWrite(LED_RED, 0);
 		digitalWrite(LED_YELLOW, 0);
-//		int i = 1318;
-		int i = 131;
+		int i = 1318;
+//		int i = 131;
 		while (i--) {
 			Sleepy::loseSomeTime(32768);
 		}

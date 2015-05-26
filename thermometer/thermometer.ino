@@ -48,9 +48,9 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 }
 
 
-void radio_send_bat(uint16_t bat, uint8_t type)
+int radio_send_bat(uint16_t bat, uint8_t type)
 {
-	radio_send('B', type, (bat >> 8) & 0xFF, bat & 0xFF);
+	return radio_send('B', type, (bat >> 8) & 0xFF, bat & 0xFF);
 }
 
 void setup(){
@@ -116,7 +116,12 @@ void loop()
 	}
 
 	uint16_t battery_level = analogRead(BATTERY_PIN);
-	radio_send_bat(battery_level, 'N');
+	bool fail = radio_send_bat(battery_level, 'N');
+
+	if (fail) {
+		digitalWrite(LED_RED, 1);
+	}
+
 	uint8_t addr[8];
 	uint8_t data[12];
 	int i = 4;
@@ -161,9 +166,12 @@ void loop()
 	printf("Temperature is %f\n", (float)raw/16.0);
 
 	radio_send('T', 'N', (raw >> 8) & 0xFF, raw & 0xFF);
+	
+	Serial.flush();
+	Sleepy::loseSomeTime(32768L);
+	digitalWrite(LED_RED, 0);
 
-	for (int i = 0; i < 15L*60L*1000L / 32768L; i++) {
-		Serial.flush();
+	for (int i = 1; i < 15L*60L*1000L / 32768L; i++) {
 		if (!Sleepy::loseSomeTime(32768L)) {
 			Serial.println("woken up by intr");
 		}

@@ -98,6 +98,12 @@ void setup(){
 	digitalWrite(LED_YELLOW, 0);
 }
 
+float battery_voltage(uint16_t battery_level)
+{
+	float lvl = (float)battery_level * 3.3 / 65536.0;
+	return lvl;
+}
+
 void loop() 
 {
 	int red = 0;
@@ -165,13 +171,27 @@ void loop()
     //// default is 12 bit resolution, 750 ms conversion time
 	printf("Temperature is %f\n", (float)raw/16.0);
 
-	radio_send('T', 'N', (raw >> 8) & 0xFF, raw & 0xFF);
+	i = 3;
+	if (battery_voltage(battery_level) >= 1.3f) {
+		i = 50;
+	}
+
+	while (i--) {
+		if (!radio_send('T', 'N', (raw >> 8) & 0xFF, raw & 0xFF)) {
+			break;
+		}
+		delay(2000);
+	}
 	
 	Serial.flush();
 	Sleepy::loseSomeTime(32768L);
 	digitalWrite(LED_RED, 0);
 
 	for (int i = 1; i < 15L*60L*1000L / 32768L; i++) {
+		if (battery_voltage(battery_level) >= 1.5f) {
+			// Battery is overcharged, try to waste energy!
+			delay(10000);
+		}
 		if (!Sleepy::loseSomeTime(32768L)) {
 			Serial.println("woken up by intr");
 		}

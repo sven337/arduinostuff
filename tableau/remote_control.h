@@ -48,6 +48,7 @@ void remote_cb_strobe(void *none);
 void remote_cb_strobeperiod(void *bool_decrease);
 void remote_cb_jump(void *int_number);
 void remote_cb_fade(void *int_number);
+void remote_cb_auto(void *dummy);
 
 #define C(CODE, NAME, CB, DATA) { 0xFF##CODE, &remote_cb_##CB, (void *)DATA }
 #define CC(CODE, NAME) { 0xFF##CODE, &remote_cb_color, (void *)&constant_color_##NAME }
@@ -61,7 +62,7 @@ const struct remote_key remote_codes[NROWS][NCOLS] = {
 		{ CC(18E7, yellow), 	CC(9867, turquoise3), 	CC(58A7, pink),	CC(D827, cyan2), },
 		{ C(28D7, "redup", colortweak, 'R'), 	C(A857, "greenup", colortweak, 'G'),		C(6897, "blueup", colortweak, 'B'),	C(E817, "quick", strobeperiod, 1 ), },
 		{ C(08F7, "reddown", colortweak, 'r'), 	C(8877, "greendown", colortweak, 'g'),	C(48B7, "bluedown", colortweak, 'b'), C(C837, "slow", strobeperiod, 0 ), },
-		{ C(30CF, "diy1", diy, 1), 		C(B04F, "diy2", diy, 2), 		C(708F, "diy3", diy, 3),	C(F00F, "auto", NULL, NULL), },
+		{ C(30CF, "diy1", diy, 1), 		C(B04F, "diy2", diy, 2), 		C(708F, "diy3", diy, 3),	C(F00F, "auto", auto, NULL), },
 		{ C(10EF, "diy4", diy, 4), 		C(906F, "diy5", diy, 5), 		C(50AF, "diy6", diy, 6),	C(D02F, "flash", strobe, NULL), },
 		{ C(20DF, "jump3", jump, 3), 	C(A05F, "jump7", jump, 7), 		C(609F, "fade3", fade, 3),	C(E01F, "fade7", fade, 7), },
 

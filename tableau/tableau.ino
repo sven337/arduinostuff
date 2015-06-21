@@ -19,7 +19,7 @@ enum mode {
 	FIXED,
 	STROBE,
 	SAVE_CONFIRM,
-} current_mode;
+} current_mode, previous_mode;
 
 /* Ramps */
 typedef signed long fixedpoint;
@@ -60,35 +60,29 @@ struct ramp {
 const int dur = 5000; 
 
 const struct ramp LED_ramps[] = {
-		{ 1, 	   0, 	   0, 	   0, 0 }, //OFF
-		{ dur,	 1.0,	   0,	   0, FADE7+1 }, //FADE7
-		{ dur/2,	 0.0,	1.0,	   0, FADE7+2 },
-		{ dur,	 0.0,	0.0,	 1.0, FADE7+3 },
-		{ dur,	 1.0,	1.0,	 0.0, FADE7+4 },
-		{ dur,	 1.0,	0.0,	 1.0, FADE7+5 },
-		{ dur,	 0.0,	1.0,	 1.0, FADE7+6 },
-		{ dur,	 1.0,	1.0,	 1.0, FADE7 }, //FADE7_END
-		{ 0,	   0,	  0,       0, ERROR+1 },     //ERROR
-		{ 1000,	   0,	  0,       0, ERROR+2 },     //ERROR
-		{ 0,	 1.0,	  0,       0, ERROR+3 },     //ERROR
-		{ 1000,	 1.0,	  0,       0, ERROR },     //ERROR_END
-		{ 0,         0,    0,    0.01, SUNRISE+1},    // SUNRISE
-		{ 300000,       0,    0,    0.02, SUNRISE+2}, // Dark blue
-		{ 900000,  0.05,    0.02,    0.05, SUNRISE+3},
-		{ 1500000,  0.10,    0.02,    0.05, SUNRISE+4}, // Sun begins to rise
-		{ 1800000,  0.20,   0.10,    0.05, SUNRISE+5},
-		{ 2100000,   0.50,   0.12,    0.05, SUNRISE+6}, // Yellowish
-		{ 2400000,   0.60,   0.4,   0.2, SUNRISE+7}, // White
-		{ 3600000,   1.00,   0.65,   0.45, OFF}, // Bright white
-		{ 0000,   1.00,   0.65,   0.45, SUNSET+1}, // SUNSET
-		{ 150000,   0.60,   0.4,   0.2, SUNSET+2}, // White
-		{ 450000,   0.50,   0.12,    0.05, SUNSET+3}, // Yellowish
-		{ 750000,  0.20,   0.10,    0.05, SUNSET+4},
-		{ 900000,  0.10,    0.02,    0.05, SUNSET+5}, // Sun begins to rise
-		{ 1050000,  0.05,    0.02,    0.05, SUNSET+6},
-		{ 1200000,       0,    0,    0.02, SUNSET+7}, // Dark blue
-		{ 1800000,         0,    0,    0.01, OFF},
-
+				  { 1, 	   0, 	   0, 	   0, 0 }, //OFF
+		[FADE7] = { dur,	 0.0,	0.0,	 1.0, FADE7+1 }, //FADE7
+				{ dur,	 0.0,	1.0,	 1.0, FADE7+2 },
+				{ dur/2,	 0.0,	1.0,	   0, FADE7+3 },
+				{ dur,	 1.0,	1.0,	 0.0, FADE7+4 },
+				{ dur,	 1.0,	   0,	   0, FADE7+5 },
+				{ dur,	 1.0,	0.0,	 1.0, FADE7+6 },
+		[FADE7_END] = { dur/2,	 0.7,	0.7,	 0.7, FADE7 }, //FADE7_END
+		[ERROR] ={ 0,	   0,	  0,       0, ERROR+1 },     //ERROR
+				{ 1000,	   0,	  0,       0, ERROR+2 },     //ERROR
+				{ 0,	 1.0,	  0,       0, ERROR+3 },     //ERROR
+		[ERROR_END] = { 1000,	 1.0,	  0,       0, ERROR },     //ERROR_END
+		[SUNRISE] = { 0,         0,    0,    0.01, SUNRISE+1},    // SUNRISE
+					{ 300000,       0,    0,    0.02, SUNRISE+2}, // Dark blue
+					{ 900000,  0.05,    0.02,    0.05, SUNRISE+3},
+					{ 1500000,  0.10,    0.02,    0.05, SUNRISE+4}, // Sun begins to rise
+					{ 1800000,  0.20,   0.10,    0.05, SUNRISE+5},
+					{ 2100000,   0.50,   0.12,    0.05, SUNRISE+6}, // Yellowish
+					{ 2400000,   0.60,   0.4,   0.2, SUNRISE+7}, // White
+					{ 3600000,   1.00,   0.65,   0.45, OFF}, // Bright white
+		[SUNSET] =  { 0,   1.00,   0.70,   0.0, SUNSET+1}, // SUNSET
+					{ 600000L,   0.8,   0.04,   0.0, SUNSET+2},
+					{ 600000L,   0.0,   0.00,   0.0, OFF},
 };
 
 
@@ -109,7 +103,8 @@ uint8_t bri(float in)
 {
 	// Maps linear 0 -> 1.0 to logarithmic 0.0 -> 1.0
 	// Magic value is ln(2) 
-	return (uint8_t)(255.0 * (exp(0.6931471805599453 / 255.0 * in) - 1.0));
+//	return (uint8_t)(255.0 * (exp(0.6931471805599453 / 255.0 * in) - 1.0));
+	return (uint8_t)(255.0 * in);
 }
 
 void set_led(long r, long g, long b) //fixedpoint!
@@ -145,8 +140,8 @@ void start_ramp(int which)
 	printf("Start ramp %d deltas r %ld g %ld b %ld\n", doing_ramp, delta_r, delta_g, delta_b);
 	current_mode = RAMP;
 	if (which == OFF) {
-		// OFF shouldn't be used, instead set current_mode to OFF
-		start_ramp(ERROR);
+		// OFF ramp isn't used: set current_mode to OFF
+		current_mode = OFF;
 	}
 }
 
@@ -207,6 +202,7 @@ void setup(){
 	bitSet(TCCR1B, WGM12);
 
 	current_mode = OFF;
+	previous_mode = OFF;
 }
 
 void loop(){
@@ -215,13 +211,18 @@ void loop(){
 	uint32_t code;
 	if (irrecv.decode(&results)) {
 		code = results.value;
-		if (code == 0xFFFFFFFF) { 
-			// "repeat" code XXX must implement
-		}
 
-		last_remote_command = lookup_code(code);
+		if (code != 0xFFFFFFFF) {
+			// Valid code, 0xFFFFFFFF is repeat = reuse previous command
+			last_remote_command = lookup_code(code);
+		} 
 		if (last_remote_command && last_remote_command->cb) {
 			last_remote_command->cb(last_remote_command->cbdata);
+
+			// Blink to acknowledge command
+			set_led(~led_r, ~led_g, ~led_b);
+			delay(200);
+			set_led(~led_r, ~led_g, ~led_b);
 		}
 		irrecv.resume(); // Receive the next value
 	}
@@ -237,7 +238,13 @@ void loop(){
 			break;
 		case PAUSE:
 		case FIXED:
+			break;
 		case SAVE_CONFIRM:
+			if (!((millis() >> 10) & 1)) {
+				set_led(0, I2F((uint32_t)255), I2F((uint32_t)255));
+			} else {
+				set_led(0, 0, I2F((uint32_t)255));
+			}
 			break;
 		case STROBE:
 			strobe();
@@ -245,6 +252,12 @@ void loop(){
 		default:
 			start_ramp(ERROR);
 	}
+}
+
+void change_mode(int newmode)
+{
+	previous_mode = current_mode;
+	current_mode = (enum mode)newmode;
 }
 
 void remote_cb_light(void *bool_increase)
@@ -255,16 +268,16 @@ void remote_cb_play(void *bool_play)
 	int start = (int)bool_play;
 	if (!start) {
 		// OFF button
-		current_mode = OFF;
+		change_mode(OFF);
 		set_led(0, 0, 0);
 		return;
 	} 
 
 	// play/pause button
 	if (current_mode == OFF || current_mode == PAUSE) {
-		current_mode = RAMP;
+		change_mode(previous_mode);
 	} else {
-		current_mode = PAUSE;
+		change_mode(PAUSE);
 	}
 }
 
@@ -274,7 +287,7 @@ void remote_cb_color(void *struct_color)
 	// Retrieve color, stop current ramp, set leds
 	const struct color *c = (const struct color *)struct_color;
 
-	current_mode = FIXED;
+	change_mode(FIXED);
 	set_led(I2F((int32_t)c->r), I2F((int32_t)c->g), I2F((int32_t)c->b));
 	
 }
@@ -297,10 +310,10 @@ void remote_cb_diy(void *int_number)
 	} else {
 		if (current_mode == FIXED) {
 			// Ask for confirmation to save the color?
-			current_mode = SAVE_CONFIRM;
+			change_mode(SAVE_CONFIRM);
 		} else {
 			// Recall fixed color from slot
-			current_mode = FIXED;
+			change_mode(FIXED);
 			EEPROM.get(slot * sizeof(col), col);
 			led_r = I2F((uint32_t)col.r);
 			led_g = I2F((uint32_t)col.g);
@@ -314,9 +327,9 @@ void remote_cb_strobe(void *none)
 {
 	// Toggle strobe mode (flash between current color and black)
 	if (current_mode == STROBE) {
-		current_mode = OFF;
+		change_mode(OFF);
 	} else {
-		current_mode = STROBE;
+		change_mode(STROBE);
 	}
 	strobe_target_r = F2I(led_r);
 	strobe_target_g = F2I(led_g);
@@ -385,5 +398,11 @@ void remote_cb_colortweak(void *char_color)
 	}
 
 	set_led(led_r, led_g, led_b);
+}
+
+void remote_cb_auto(void *dummy)
+{
+	// Use "auto" button to start sunset sequence
+	start_ramp(SUNSET);
 }
 

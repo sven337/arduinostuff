@@ -33,8 +33,6 @@ const uint64_t pipe_address = 0xF0F0F0F0F3LL;
 volatile boolean triggered = false;
 unsigned int triggered_counter = 0;
 
-static long next_ldr_report_at;
-
 static unsigned long last_ping_at = 0;
 
 int init_failed = 0;
@@ -155,20 +153,30 @@ void loop()
 {
 	int red = 0;
 	while (init_failed) {
-			digitalWrite(LED_RED, red);
-			red = !red;
-			// Christmas tree if init failed
-			digitalWrite(LED_YELLOW, 1);
-			delay(100);
-			digitalWrite(LED_YELLOW, 0);
-			delay(100);
-			digitalWrite(LED_YELLOW, 1);
-			delay(100);
-			digitalWrite(LED_YELLOW, 0);
-			delay(100);
+		digitalWrite(LED_RED, red);
+		red = !red;
+		// Christmas tree if init failed
+		digitalWrite(LED_YELLOW, 1);
+		delay(100);
+		digitalWrite(LED_YELLOW, 0);
+		delay(100);
+		digitalWrite(LED_YELLOW, 1);
+		delay(100);
+		digitalWrite(LED_YELLOW, 0);
+		delay(100);
+		return;
 	}
 
-#if ANALOG_COMPARATOR_IRQ
+	if (millis() > last_ping_at + 3600000) {
+		uint16_t battery_level = analogRead(BATTERY_PIN);
+		radio_send_bat(battery_level, 'N');
+	}
+
+	if (millis() - last_trigger_at > 5000) {
+		digitalWrite(LED_YELLOW, 0);
+		digitalWrite(LED_RED, 0);
+	} 
+
 	if (triggered) {
 		printf("Triggered %d times, at %d seconds\n", triggered_counter, millis() / 1000);
 		bool fail = true;
@@ -207,46 +215,16 @@ void loop()
 		while (i--) {
 			Sleepy::loseSomeTime(32768);
 		}
-		ignore_next_trigger = true;
+//		ignore_next_trigger = true; XXX does it end up ignoring legit triggers?
 		ACSR |= _BV(ACIE);
 	}
 
-	if (millis() - last_trigger_at > 5000) {
-		digitalWrite(LED_YELLOW, 0);
-		digitalWrite(LED_RED, 0);
-	} 
-
-	if (millis() > last_ping_at + 3600000) {
-		uint16_t battery_level = analogRead(BATTERY_PIN);
-		radio_send_bat(battery_level, 'N');
-	}
 
 	Serial.flush();
 	set_sleep_mode(SLEEP_MODE_IDLE);
 	sleep_enable();
 	sleep_cpu();
 	sleep_disable();
-
-#else
-
-	if (millis() > next_ldr_report_at) {
-		next_ldr_report_at = millis() + 1000;
-		int light_level = get_light_level();
-		printf("Mailbox light %d\n", light_level);
-		if (radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF)) {
-			digitalWrite(LED_RED, 1);
-		} else {
-			digitalWrite(LED_YELLOW, 1);
-			delay(500);
-			digitalWrite(LED_YELLOW, 0);
-			delay(500);
-			digitalWrite(LED_YELLOW, 1);
-			delay(500);
-			digitalWrite(LED_YELLOW, 0);
-		}
-	}
-#endif
-
 }
 
 

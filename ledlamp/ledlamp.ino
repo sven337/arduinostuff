@@ -1,5 +1,5 @@
 #include <SPI.h>
-#include <dht.h>
+#include <OneWire.h>
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
@@ -9,17 +9,17 @@ const int CE_PIN = 8;
 const int CSN_PIN = 9;
 const int LDR_PIN = A0; // P1 A
 const int THERM_PIN = A1; // P2 A
-const int DHT_PIN = 7;
+const int DS18B20_PIN = 7; // P4 D
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
-#define DIM_MAX 300.0
+#define DIM_MAX 330.0
 
 RF24 radio(CE_PIN, CSN_PIN);
 const uint64_t pipe_address = 0xF0F0F0F0F2LL;
 
-dht DHT;
+OneWire ds(DS18B20_PIN);
 
 int lamp_off = 0;
-int target_light_level = 90;
+int target_light_level = 40;
 uint8_t light_level = 150;
 uint8_t led_power = 200;
 uint8_t old_led_power = 0;
@@ -33,9 +33,9 @@ unsigned long next_ambient_temp_report_at;
 int percent_to_light_level(int pct)
 {
 	// light level goes from 4096 to 0 when pct goes from 0 to 100
-	// however, the *useful* dimming range is not 4096 to 0, so restrict it to DIM_MAX to 0
+	// however, the *useful* dimming range is not 4096 to 0, so restrict it to DIM_MAX to 10
 
-	return constrain(DIM_MAX * (100 - pct) / 100.0, 0, 4096);
+	return constrain(DIM_MAX * (100 - pct) / 100.0, 10, 4096);
 }
 
 void set_led(uint8_t val)
@@ -51,9 +51,9 @@ int get_light_level()
 
 void radio_send_led_power(uint8_t event_type)
 {
-	if (light_level == 0 || light_level == 255 || millis() > next_lightlevel_send_at) {
+	if (led_power == 0 || led_power == 255 || millis() > next_lightlevel_send_at) {
 		radio_send('D', event_type, (led_power * 100 / 255), 0);
-		next_lightlevel_send_at = millis() + 500;
+		next_lightlevel_send_at = millis() + 1000;
 	}
 }
 
@@ -154,6 +154,54 @@ int get_temperature()
 	return (int)(T * 100.0);
 }
 
+int get_ambient_temperature()
+{
+	uint8_t addr[8];
+	uint8_t data[12];
+	int i = 4;
+	while(!ds.search(addr) && i--) {
+		Serial.println("No more addresses.");
+		ds.reset_search();
+		delay(250);
+	}
+    if (!i) {
+		return 0;
+	}
+
+	ds.reset();
+	ds.select(addr);
+	ds.write(0x44, 1);
+	delay(800);
+	uint8_t present = ds.reset();
+	ds.select(addr);    
+	ds.write(0xBE);
+
+	Serial.print("  Data = ");
+	Serial.print(present, HEX);
+	Serial.print(" ");
+	for (int i = 0; i < 9; i++) {
+		data[i] = ds.read();
+		Serial.print(data[i], HEX);
+		Serial.print(" ");
+	}
+	Serial.println();
+
+	// Convert the data to actual temperature
+	// because the result is a 16 bit signed integer, it should
+	// be stored to an "int16_t" type, which is always 16 bits
+	// even when compiled on a 32 bit processor.
+	int16_t raw = (data[1] << 8) | data[0];
+    byte cfg = (data[4] & 0x60);
+    // at lower res, the low bits are undefined, so let's zero them
+    if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+    else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+    else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+    //// default is 12 bit resolution, 750 ms conversion time
+	printf("ambient Temperature is %d\n", (int)(100.0*raw/16.0));
+
+	return (int)(((float)raw/16.0) * 100.0);
+}
+
 void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
 	uint8_t payload[4] = { p0, p1, p2, p3 };
@@ -180,10 +228,10 @@ void radio_send_light_target()
 	}
 }
 
-void radio_send_ambient(uint8_t deg, uint8_t hum)
+void radio_send_ambient(uint16_t deg)
 {
-	radio_send('A', 'N', deg, hum);
-}
+	radio_send('A', 'N', (deg >> 8) & 0xFF, deg & 0xFF);
+} 
 
 void setup(){
 	printf_begin();
@@ -212,10 +260,13 @@ void setup(){
 	// Light level sensor
 	pinMode(LDR_PIN, INPUT);
 	digitalWrite(LDR_PIN, HIGH);
+	printf("Light level %d\n", get_light_level());
 
 	// Thermistor
 	pinMode(THERM_PIN, INPUT);
 //	digitalWrite(THERM_PIN, LOW);
+	printf("thermistor Temperature is %d\n", get_temperature());
+
 }
 
 void loop(){
@@ -253,37 +304,10 @@ void loop(){
 	}
 
 	if (millis() > next_ambient_temp_report_at) {
-		// Report ambiant temperature & humidity from DHT11
+		int deg = get_ambient_temperature();
+		printf("Ambient temp %d\n", deg);
+		radio_send_ambient(deg);
 		next_ambient_temp_report_at = millis() + 15L * 60L * 1000L;
-
-		int chk = DHT.read11(DHT_PIN);
-		switch (chk) {
-			case DHTLIB_OK:
-				printf("DHT OK\n");
-				break;
-			case DHTLIB_ERROR_CHECKSUM: 
-				Serial.print("Checksum error,\n"); 
-				break;
-			case DHTLIB_ERROR_TIMEOUT: 
-				Serial.print("Time out error,\n"); 
-				break;
-			case DHTLIB_ERROR_CONNECT:
-				Serial.print("Connect error,\n");
-				break;
-			case DHTLIB_ERROR_ACK_L:
-				Serial.print("Ack Low error,\n");
-				break;
-			case DHTLIB_ERROR_ACK_H:
-				Serial.print("Ack High error,\n");
-				break;
-			default:
-				printf("DHT XXX\n");
-		}
-
-		int deg = DHT.temperature;
-		int hum = DHT.humidity;
-		printf("Ambient temp %d humidity %d%%\n", deg, hum);
-		radio_send_ambient(deg, hum);
 	}
 
 	while (radio.available()) {

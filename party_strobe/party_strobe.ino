@@ -4,14 +4,14 @@
 #include "nRF24L01.h"
 #include "RF24.h"
 
-const int ON_OFF_PIN = 4; // P1 D
-const int BUTTON_PIN = 3; // P1 IRQ
-const int SPEED_PIN = A0; // P1 A
-const int THERM_PIN = A5;
+const int ON_OFF_PIN = 7;
+const int BUTTON_PIN = 8;
+const int SPEED_PIN = A0;
+const int SOUND_PIN = A3;
 
 const int R = 6;
-const int G = 9;
-const int B = 5;
+const int G = 5;
+const int B = 9;
 
 struct sequence {
 	int time;
@@ -20,169 +20,151 @@ struct sequence {
 	float b;
 };
 
-// "Worklist"
-enum sequence_type {
-	NONE = 0,
-	STROBE = 1,
-	SUNRISE = 2,
-	SUNSET = 3,
-	LAST_SEQ,
-} doing_sequence;
-
-static unsigned long sequence_start_time;
-
 static float sequence_speed_factor = 1.0;
 static unsigned long last_speed_factor_at;
 
-static unsigned long last_therm_check_at;
+static bool strobe_off;
+/* Ramps */
+typedef signed long fixedpoint;
 
-static int state_off = 0;
-static int thermal_override = 0;
+#define I2F(I) (I << 20)
+#define F2I(F) (F >> 20)
 
-#define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
-#define ANALOG_RESOLUTION 8
-#define ANALOG_MAX ((1 << ANALOG_RESOLUTION) - 1)
+static fixedpoint led_r = 0;
+static fixedpoint led_g = 0;
+static fixedpoint led_b = 0;
 
-static uint8_t led_current_r;
-static uint8_t led_current_g;
-static uint8_t led_current_b;
+static fixedpoint delta_r;
+static fixedpoint delta_g;
+static fixedpoint delta_b;
 
-//RF24 radio(CE_PIN, CSN_PIN);
-//const uint64_t address_pi = 0xF0F0F0F0F1LL;
+static unsigned long ramp_start_time;
+static unsigned long ramp_last_step;
 
-// see https://svn.kapsi.fi/jpa/led-controller/sw/src/led_task.c
-const struct sequence sunrise_sequence[] = { 
-		{ 0,         0,    0,    0.01},
-		{ 3,       0,    0,    0.02}, // Dark blue
-		{ 9,  0.05,    0.02,    0.05},
-		{ 15,  0.10,    0.02,    0.05}, // Sun begins to rise
-		{ 18,  0.20,   0.10,    0.05},
-		{ 21,   0.50,   0.12,    0.05}, // Yellowish
-		{ 24,   0.60,   0.4,   0.2}, // White
-		{ 36,   1.00,   0.65,   0.45}, // Bright white
+enum mode {
+	OFF = 0, 
+	MUSIC,
+	RAMP,
+	STROBE,
+} current_mode; 
+
+enum ramp_name {
+    FADE7 = 1,
+    FADE7_END = 7,
 };
 
-const struct sequence sunset_sequence[] = { 
-		{ 0,   1.00,   0.65,   0.45}, // Bright white
-		{ 2,   0.60,   0.4,   0.2}, // White
-		{ 5,   0.50,   0.12,    0.05}, // Yellowish
-		{ 8,  0.20,   0.10,    0.05},
-		{ 9,  0.10,    0.02,    0.05}, // Sun begins to rise
-		{ 10,  0.05,    0.02,    0.05},
-		{ 12,       0,    0,    0.02}, // Dark blue
-		{ 18,         0,    0,    0.01},
+static uint8_t doing_ramp;
+
+struct ramp {
+    long duration;
+    float r;
+    float g;
+    float b;
+    uint8_t next_ramp;
 };
 
-float bri(float in)
-{
-	// Maps linear 0 -> 1.0 to logarithmic 0.0 -> 1.0
-	// Magic value is ln(2) 
-	return (exp(0.6931471805599453 * in) - 1.0);
-}
+const int dur = 5000; 
 
-void set_led(float r, float g, float b)
-{
-	r = bri(r);
-	g = bri(g);
-	b = bri(b);
+const struct ramp LED_ramps[] = {
+                  { 1,     0,      0,      0, 0 }, //OFF
+        [FADE7] = { dur,     0.0,   0.0,     1.0, FADE7+1 }, //FADE7
+                { dur,   0.0,   1.0,     1.0, FADE7+2 },
+                { dur,     0.0,   1.0,       0, FADE7+3 },
+                { dur,   1.0,   1.0,     0.0, FADE7+4 },
+                { dur,   1.0,      0,      0, FADE7+5 },
+                { dur,   1.0,   0.0,     1.0, FADE7+6 },
+        [FADE7_END] = { dur,   0.7,   0.7,     0.7, FADE7 }, //FADE7_END
+};
 
-	r *= ANALOG_MAX;
-	g *= ANALOG_MAX;
-	b *= ANALOG_MAX;
-
-	led_current_r = r;
-	led_current_g = g;
-	led_current_b = b;
-
-	analogWrite(R, r);
-	analogWrite(G, g);
-	analogWrite(B, b);
-}
-
-void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
-{
-/*	uint8_t payload[4] = { p0, p1, p2, p3 };
-	radio.stopListening();
-	delay(10);
-	radio.powerUp();
-	bool ok = radio.write(payload, 4);
-	if (ok) 
-		Serial.println("send ok");
-	else
-		Serial.println("send KO");
-	delay(1);
-	radio.startListening();*/
-}
-
-void start_sequence(int which)
-{
-//	printf("Starting sequence %d\n", which);
-	doing_sequence = (enum sequence_type) which;
-	sequence_start_time = millis();
-	radio_send('S', which, 0, 0);
-}
-
-void stop_sequence()
-{
-	doing_sequence = NONE;
-	set_led(0, 0, 0);
-//	printf("Stopping sequence\n");
-}
-
-float get_delay_in_sequence()
-{
-	float delay_in_sequence = (millis() - sequence_start_time) / 1000.0;
-	delay_in_sequence *= sequence_speed_factor;
-	return delay_in_sequence;
-}
-
-void led_sequence(const struct sequence *seq, int seq_size)
-{
-	const struct sequence *s = NULL;
-	int cur_seq;
-	float delay_in_sequence = get_delay_in_sequence();
-	float pct;
-	float delta_r, delta_g, delta_b;
-
-	// Compute current sequence number
-	for (cur_seq = seq_size - 1; cur_seq >= 0; cur_seq--) {
-		if (delay_in_sequence >= seq[cur_seq].time) {
-			s = &seq[cur_seq];
-			break;
-		}
-	}
-
-	// Halt when reaching the last sequence
-	if (cur_seq == seq_size - 1) {
-		set_led(s->r, s->g, s->b);
-		stop_sequence();
-		return;
-	}
-
-	pct = (delay_in_sequence - s->time) / ((s+1)->time - s->time);
-	delta_r = (s+1)->r - s->r;
-	delta_g = (s+1)->g - s->g;
-	delta_b = (s+1)->b - s->b;
-	//printf("Pct %d, delta_r %d\n", (int)(pct * 1000), (int)(delta_r * 1000));
-
-	set_led(s->r + delta_r * pct, s->g + delta_g * pct, s->b + delta_b * pct);
-}
 
 void on_off_interrupt(void)
 {
-	state_off = PCintPort::pinState;
+	// Potentiometer on/off enables/disables strobe from music mode
+	strobe_off = PCintPort::pinState;
+	printf("strobe_off: %d\n", strobe_off);
 }
 
 void button_interrupt(void)
 {
-	if (doing_sequence == LAST_SEQ - 1)
-		stop_sequence();
-	else start_sequence(doing_sequence + 1);
+	if (current_mode == STROBE) {
+		current_mode = OFF;
+	} else {
+		current_mode = (enum mode)(current_mode + 1);
+	}
+
+	printf("current mode is %d\n", current_mode);
+}
+
+uint8_t bri(float in)
+{
+	// Maps linear 0 -> 1.0 to logarithmic 0.0 -> 1.0
+	// Magic value is ln(2) 
+//	return (uint8_t)(255.0 * (exp(0.6931471805599453 / 255.0 * in) - 1.0));
+	return (uint8_t)(255.0 * in);
+}
+
+void set_led(long r, long g, long b) //fixedpoint!
+{
+	led_r = r;
+	led_g = g;
+	led_b = b;
+
+	uint8_t my_r, my_g, my_b;
+#define BRI_CORRECT(X) (bri(F2I(X)) & 0xFF)
+	my_r = BRI_CORRECT(r);
+	my_g = BRI_CORRECT(g);
+	my_b = BRI_CORRECT(b);
+	printf("set led to %d %d %d\n", my_r, my_g, my_b);
+	analogWrite(R, my_r);
+	analogWrite(G, my_g);
+	analogWrite(B, my_b);
+}
+
+void start_ramp(int which)
+{
+	doing_ramp = which;
+	const struct ramp *r = &LED_ramps[doing_ramp];
+
+	ramp_start_time = millis();
+	ramp_last_step = ramp_start_time;
+
+	// Compute per-millisecond deltas
+	delta_r = (I2F((int32_t)(255.0 * r->r)) - led_r) / r->duration;
+	delta_g = (I2F((int32_t)(255.0 * r->g)) - led_g) / r->duration;
+	delta_b = (I2F((int32_t)(255.0 * r->b)) - led_b) / r->duration;
+
+	printf("Start ramp %d deltas r %ld g %ld b %ld\n", doing_ramp, delta_r, delta_g, delta_b);
+	current_mode = RAMP;
+	if (which == OFF) {
+		// OFF ramp isn't used: set current_mode to OFF
+		current_mode = OFF;
+	}
+}
+
+void led_ramp(void)
+{
+	const struct ramp *r = &LED_ramps[doing_ramp];
+	const unsigned long now = millis();
+	unsigned long delay_in_ramp = now - ramp_start_time;
+	if (delay_in_ramp > r->duration) {
+		// Ramp is done, move on
+		if (r->next_ramp != doing_ramp) {
+			set_led(I2F((uint32_t)(255.0 * r->r)), I2F((uint32_t)(255.0 * r->g)), I2F((uint32_t)(255.0 * r->b)));
+			start_ramp(r->next_ramp);
+		}
+		return;
+	}
+
+	unsigned long this_step_duration = now - ramp_last_step;
+	ramp_last_step = now;
+
+	set_led(led_r + this_step_duration * delta_r, led_g + this_step_duration * delta_g, led_b + this_step_duration * delta_b);
 }
 
 void strobe()
 {
-	static float next = 0.0;
+	static int last_wait = 0;
+	static fixedpoint next = 0;
 	static long next_at = 0;
 
 	long now = millis();
@@ -190,45 +172,29 @@ void strobe()
 
 	float freq = 1 + sequence_speed_factor * 30;
 	wait = 1000.0 / freq;
-	printf("Wait = %d\n", wait);
+	if (wait != last_wait) {
+		printf("Wait = %d\n", wait);
+		last_wait = wait;
+	}
 
 	if (now > next_at) {
 		set_led(next, next, next);
 		next_at = now + wait;
-		printf("Wait = %d\n", wait);
-		next = 1.0 - next;
+		next = I2F((uint32_t)255) - next;
+		printf("next = %d\n", next);
 	} else {
 		if (next_at - now > wait)
 			next_at = now + wait;
 	}
 }
 
-int get_temperature()
+void music()
 {
-	// Integrated pullup has R1 = 20k (no it does not)
-	// We have Uth = Rth * E / (R1 + Rth)
-    // let V = Uth * 1023 / E value read by the ADC
-    // <=> V = 1023 * Rth / (R1 + Rth)
-	// solve in Rth :
-    // Rth 	=  R1 * V / (1023 - V)
-
-	// Once we have Rth, use beta parameter equation for NTC:
-	// T = Beta / ln (Rth / R0 * exp(-Beta/T0))
-
-	unsigned int adc = analogRead(THERM_PIN);
-	const unsigned long int R1 = 40000;
-	const float Beta = 4400.0;
-	const float Beta_R0 = 100000.0;
-	const float Beta_T0 = 25.0+273.0;
-	float Rth = R1 * adc / (float)(1023 - adc);
-
-	float T = Beta / log(Rth / (Beta_R0 * exp(-Beta / Beta_T0))) - 273.0;
-//	printf("adc is %d, R1*adc is %ld, Rth is %lu, temp is %u\n", adc, R1*adc, (long unsigned int)Rth, (int)(T * 100.0));
-	
-	return (int)(T * 100.0);
+	// FFT and set leds accordingly
 }
 
-void setup(){
+void setup()
+{
 	//start serial connection
 	printf_begin();
 	Serial.begin(57600);
@@ -240,101 +206,49 @@ void setup(){
 	pinMode(SPEED_PIN, INPUT);
     digitalWrite(SPEED_PIN, HIGH);
 
-	pinMode(THERM_PIN, INPUT);
-	digitalWrite(THERM_PIN, HIGH);
-
 	printf("setup\n");
 	PCintPort::attachInterrupt(ON_OFF_PIN, &on_off_interrupt, CHANGE);
 	PCintPort::attachInterrupt(BUTTON_PIN, &button_interrupt, FALLING);
-	/*radio.begin();
-	radio.setRetries(15, 15);
-	radio.setAutoAck(true);
-	radio.setChannel(95);
-	radio.setPayloadSize(sizeof(unsigned long));
-	radio.setPALevel(RF24_PA_MAX);
-	radio.setDataRate(RF24_250KBPS);
-	radio.openReadingPipe(1, address_pi);
-	radio.openWritingPipe(address_pi);
-	radio.startListening();
-
-	radio.printDetails();*/
 
 	// fix PWM (LED flicker)
 	bitSet(TCCR1B, WGM12);
 
-	state_off = digitalRead(ON_OFF_PIN);
+	strobe_off = digitalRead(ON_OFF_PIN);
+
+	current_mode = RAMP;
+	start_ramp(FADE7);
 }
 
-void loop(){
+void loop()
+{
 
 	if (millis() - last_speed_factor_at > 500) {
 	   last_speed_factor_at = millis();
    	   float val = analogRead(SPEED_PIN) / 1024.0;
 	   val = - (33000.0/36000.0) * val / (val - 1);
 	   val = constrain(val, 0.0, 1.0);
-//	   Serial.println(val);
 	   sequence_speed_factor = val;
-
-	   printf("Sequence %d\n", doing_sequence);
 	}	   
 
-	if (millis() - last_therm_check_at > 5000) {
-		last_therm_check_at = millis();
-		int temperature = get_temperature();
-		printf("Temp is %d\n", temperature);
-		if (temperature > 5500) {
-			printf("Thermal alarm\n");
-			thermal_override = 1;
-		} else if (temperature < 4000) {
-			if (thermal_override) {
-				printf("Stand down from thermal alarm\n");
-			}
-			thermal_override = 0;
-		}
-	}
 
-	if (state_off || thermal_override) {
-		set_led(0, 0, 0);
-		return;
-	}
-
-	// Should we do the sunrise sequence?
-	switch (doing_sequence) {
-		case SUNRISE:
-			led_sequence(sunrise_sequence, ARRAY_SZ(sunrise_sequence));
-			break;
-		case SUNSET:
-			led_sequence(sunset_sequence, ARRAY_SZ(sunset_sequence));
-			break;
-		case STROBE:
-			strobe();
-			break;
-		case NONE:
+	switch (current_mode) {
+		case OFF:
 			set_led(0, 0, 0);
 			break;
-		default:
-			doing_sequence = NONE;
+		case RAMP:
+			// XXX when should we start_ramp()?
+			led_ramp();
+			break;
+		case STROBE:
+			if (!strobe_off) {
+				strobe();
+				break;
+			}
+			// Fall through
+		case MUSIC:
+			music();
+			break;
 	}
-
-/*
-	while (radio.available()) {
-		Serial.println("Radio available");
-		uint8_t payload[4];
-		radio.read(payload, 4);
-		// Sequence
-		if (payload[0] == 'S') {
-			start_sequence(payload[1]);
-		} else if (payload[0] == 'F') {
-			fast_sequence = !fast_sequence;
-			radio_send('F', fast_sequence, 0, 0);
-		} else if (payload[0] == 'L') {
-			radio_send('L', led_current_r, led_current_g, led_current_b);
-			radio_send('S', doing_sequence, (int)get_delay_in_sequence() & 0xFF, ((int)get_delay_in_sequence() >> 8) & 0xFF);
-		} else if (payload[0] == 'V') {
-			set_led(payload[0]/255.0, payload[1]/255.0, payload[2]/255.0);
-			radio_send('L', led_current_r, led_current_g, led_current_b);
-		}
-	}*/
 }
 
 

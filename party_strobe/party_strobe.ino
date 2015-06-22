@@ -4,10 +4,15 @@
 #include "nRF24L01.h"
 #include "RF24.h"
 
+#define LOG_OUT 0
+#define OCTAVE 1
+#define FHT_N 128 // set to 125 point fht
+#include <FHT.h>
+
 const int ON_OFF_PIN = 7;
 const int BUTTON_PIN = 8;
-const int SPEED_PIN = A0;
-const int SOUND_PIN = A3;
+const int SPEED_PIN = A3;
+const int SOUND_PIN = A0;
 
 const int R = 6;
 const int G = 5;
@@ -99,8 +104,8 @@ uint8_t bri(float in)
 {
 	// Maps linear 0 -> 1.0 to logarithmic 0.0 -> 1.0
 	// Magic value is ln(2) 
-//	return (uint8_t)(255.0 * (exp(0.6931471805599453 / 255.0 * in) - 1.0));
-	return (uint8_t)(255.0 * in);
+	return (uint8_t)(255.0 * (exp(0.6931471805599453 / 255.0 * in) - 1.0));
+//	return (uint8_t)(255.0 * in);
 }
 
 void set_led(long r, long g, long b) //fixedpoint!
@@ -190,7 +195,45 @@ void strobe()
 
 void music()
 {
+int chnLow = 3;
+int chnMid = 4;
+int chnHigh = 5;
+
 	// FFT and set leds accordingly
+		cli();  // UDRE interrupt slows this way down on arduino1.0
+		for (int i = 0 ; i < FHT_N ; i++) { // save 256 samples
+			while(!(ADCSRA & 0x10)); // wait for adc to be ready
+			ADCSRA = 0xf5; // restart adc
+			byte m = ADCL; // fetch adc data
+			byte j = ADCH;
+			int k = (j << 8) | m; // form into an int
+			k -= 0x0200; // form into a signed int
+			k <<= 6; // form into a 16b signed int
+			fht_input[i] = k; // put real data into bins
+		}
+		fht_window(); // window the data for better frequency response
+		fht_reorder(); // reorder the data before doing the fht
+		fht_run(); // process the data in the fht
+		fht_mag_octave(); // take the output of the fht
+		sei();
+/*		Serial.write(255); // send a start byte
+		Serial.write(fht_log_out, FHT_N/2); // send out the data*/
+//		printf("got %d %d %d\n", fht_log_out[chnLow], fht_log_out[chnMid], fht_log_out[chnHigh]);
+	/*	for (int i = 0; i < LOG_N; i++) {
+			printf("Bin %d value %d\n", i, fht_log_out[i]);
+		}*/
+    fht_oct_out[chnLow] = map(constrain(fht_oct_out[chnLow]-89, 0, 250), 0, 200, 0, 150); //low
+    fht_oct_out[chnMid] = map(constrain(fht_oct_out[chnMid]-25, 0, 250), 0, 240, 0, 150); //mid
+    fht_oct_out[chnHigh] = map(constrain(fht_oct_out[chnHigh]-15, 0, 250), 0, 240, 0, 150); //high*/
+	
+	//with bias
+   
+   printf("%d %d %d\n", fht_oct_out[chnLow], fht_oct_out[chnMid], fht_oct_out[chnHigh]);
+	set_led(I2F((uint32_t)fht_oct_out[chnHigh]), 
+			I2F((uint32_t)fht_oct_out[chnMid]), 
+			I2F((uint32_t)fht_oct_out[chnLow]));
+
+
 }
 
 void setup()
@@ -215,8 +258,13 @@ void setup()
 
 	strobe_off = digitalRead(ON_OFF_PIN);
 
-	current_mode = RAMP;
-	start_ramp(FADE7);
+	current_mode = MUSIC;
+//	start_ramp(FADE7);
+
+	TIMSK0 = 0; // turn off timer0 for lower jitter
+	ADCSRA = 0xe5; // set the adc to free running mode
+	ADMUX = 0x40; // use adc0
+	DIDR0 = 0x01; // turn off the digital input for adc0
 }
 
 void loop()

@@ -316,7 +316,7 @@ void setup()
 {
 	//start serial connection
 	printf_begin();
-	Serial.begin(57600);
+	Serial.begin(115200);
 	pinMode(ON_OFF_PIN, INPUT);
 	digitalWrite(ON_OFF_PIN, HIGH);
 	pinMode(BUTTON_PIN, INPUT);

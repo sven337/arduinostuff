@@ -6,7 +6,8 @@
 
 #define LOG_OUT 0
 #define OCTAVE 1
-#define FHT_N 128 // set to 125 point fht
+#define FHT_N 256
+#define OCT_NORM 0
 #include <FHT.h>
 
 const int ON_OFF_PIN = 7;
@@ -203,13 +204,14 @@ void strobe()
 
 void music()
 {
-	Serial.print("music");
-	const int oct_low = 3;
+	const int oct_low = 2;
 	const int oct_mid = 4;
-	const int oct_high = 5;
+	const int oct_high = 6;
 
 	int timer = TIMSK0;
 	int adcsra = ADCSRA;
+	ADMUX = 0x40; // use adc0
+	DIDR0 = 0x01; // turn off the digital input for adc0
 	ADCSRA = 0xe5; // set the adc to free running mode
 	TIMSK0 = 0;
 	// FFT and set leds accordingly
@@ -246,6 +248,7 @@ void music()
 		int bias;
 		// int avgidx is equal to i;
 		enum operation op;
+		float factor;
 	} channels[] = {
 			{ oct_low , 0, ERROR },
 			{ oct_mid , 0, ERROR },
@@ -255,6 +258,7 @@ void music()
 	for (int i = 0; i < 3; i++) {
 		int bias = channels[i].bias;
 		int magidx = channels[i].magidx;
+		int diff;
 
 		// Remove constant component and remap to 0..255	
 
@@ -264,14 +268,18 @@ void music()
 		// 		value < avg: decay (faster as value is lower)
 		// 		value = avg: slow decay
 		// 		value > avg: rise exponentially
-		if (abs(fht_oct_out[magidx] - freq_avg_mag[i]) < 7) {
+		
+		diff = fht_oct_out[magidx] - freq_avg_mag[i];
+		if (abs(diff) < 5) {
 			// Roughly equal, so slow decay
 			channels[i].op = SLOW_DECAY;
-		} else if (fht_oct_out[magidx] < freq_avg_mag[i]) {
+		} else if (diff < 0) {
 			channels[i].op = FAST_DECAY;
 		} else {
 			channels[i].op = RISE;
 		}
+
+		channels[i].factor = constrain(abs(diff)/40.0, 0.1, 1.0);
 
 		// Update moving average
 		freq_avg_mag[i] = (3 * freq_avg_mag[i] + fht_oct_out[magidx]) / 4;
@@ -282,30 +290,30 @@ void music()
 		new_led[i] = (i == 0) ? led_b : ((i == 1) ? led_g : led_r);
 		switch (channels[i].op) {
 			case SLOW_DECAY:
-				if (new_led[i] < 5) {
+				if (new_led[i] < 5 * channels[i].factor) {
 					new_led[i] = 0;
 				} else {
-					new_led[i] -= 5;
+					new_led[i] -= 5 * channels[i].factor;
 				}
 				break;
 			case FAST_DECAY:
-				if (new_led[i] < 10) {
+				if (new_led[i] < 10 * channels[i].factor) {
 					new_led[i] = 0;
 				} else {
-					new_led[i] -= 10;
+					new_led[i] -= 10 * channels[i].factor;
 				}
 				break;
 			case RISE:
-				if (new_led[i] > 200) {
+				if (new_led[i] > 255 - 10 * channels[i].factor) {
 					new_led[i] = 255;
 				} else {
-					new_led[i] += 50;
+					new_led[i] += 10 * channels[i].factor;
 				}
 				break;
 		}
 	}	
 
-   printf("%d %d %d (avg %d %d %d)->r %d g %d b %d\n", fht_oct_out[oct_low], fht_oct_out[oct_mid], fht_oct_out[oct_high], freq_avg_mag[0], freq_avg_mag[1], freq_avg_mag[2], new_led[2], new_led[1], new_led[0]);
+   printf("%d %d %d (avg %d %d %d) op=(%d %d %d) ->r %d g %d b %d\n", fht_oct_out[oct_low], fht_oct_out[oct_mid], fht_oct_out[oct_high], freq_avg_mag[0], freq_avg_mag[1], freq_avg_mag[2], channels[0].op, channels[1].op, channels[2].op, new_led[2], new_led[1], new_led[0]);
 
    set_led(new_led[2], new_led[1], new_led[0]);
 

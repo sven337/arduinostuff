@@ -231,7 +231,14 @@ void music()
 	sei();
 	TIMSK0 = timer;
 	ADCSRA = adcsra;
-		
+	
+	Serial.write(255);
+	for (int i = 0; i < 8; i++) {
+		for (int j = 0; j < 16; j++) {
+			Serial.write(fht_oct_out[i]);
+		}
+	}	
+
 	enum operation { ERROR, RISE, SLOW_DECAY, FAST_DECAY };
 
 	struct {

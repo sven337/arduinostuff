@@ -342,10 +342,11 @@ void setup()
 
 	strobe_off = digitalRead(ON_OFF_PIN);
 
-	current_mode = STROBE;
+	current_mode = MUSIC;
 //	start_ramp(FADE7);
 	ADMUX = 0x40; // use adc0
 	DIDR0 = 0x01; // turn off the digital input for adc0
+//	TIMSK0 = 0; // turn off timer0 for lower jitter
 
 }
 

@@ -7,7 +7,7 @@
 #define LOG_OUT 0
 #define OCTAVE 1
 #define FHT_N 256
-#define OCT_NORM 0
+#define OCT_NORM 1
 #include <FHT.h>
 
 const int ON_OFF_PIN = 7;
@@ -15,9 +15,9 @@ const int BUTTON_PIN = 8;
 const int SPEED_PIN = A3;
 const int SOUND_PIN = A0;
 
-const int R = 6;
-const int G = 5;
-const int B = 9;
+const int R = 5;
+const int G = 9;
+const int B = 6;
 
 struct sequence {
 	int time;
@@ -248,7 +248,7 @@ void music()
 		int bias;
 		// int avgidx is equal to i;
 		enum operation op;
-		float factor;
+		float diff;
 	} channels[] = {
 			{ oct_low , 0, ERROR },
 			{ oct_mid , 0, ERROR },
@@ -279,35 +279,36 @@ void music()
 			channels[i].op = RISE;
 		}
 
-		channels[i].factor = constrain(abs(diff)/40.0, 0.1, 1.0);
+		channels[i].diff = abs(diff);
 
 		// Update moving average
-		freq_avg_mag[i] = (3 * freq_avg_mag[i] + fht_oct_out[magidx]) / 4;
+		freq_avg_mag[i] = (2 * freq_avg_mag[i] + fht_oct_out[magidx]) / 3;
 	}
 
 	int new_led[3];
 	for (int i = 0; i < 3; i++) {
-		new_led[i] = (i == 0) ? led_b : ((i == 1) ? led_g : led_r);
+		new_led[i] = (i == 0) ? led_g : ((i == 1) ? led_b : led_r);
+		float factor = constrain(channels[i].diff / ((i == 2) ? 45.0 : 35.0), 0.01, 3.0);
 		switch (channels[i].op) {
 			case SLOW_DECAY:
-				if (new_led[i] < 5 * channels[i].factor) {
-					new_led[i] = 0;
+				if (new_led[i] > 15) {
+					new_led[i] -= 15;
 				} else {
-					new_led[i] -= 5 * channels[i].factor;
+					new_led[i] = 0;
 				}
 				break;
 			case FAST_DECAY:
-				if (new_led[i] < 10 * channels[i].factor) {
+				if (new_led[i] < 75.0 * factor) {
 					new_led[i] = 0;
 				} else {
-					new_led[i] -= 10 * channels[i].factor;
+					new_led[i] -= 75.0 * factor;
 				}
 				break;
 			case RISE:
-				if (new_led[i] > 255 - 10 * channels[i].factor) {
+				if (new_led[i] > 255.0 - 100.0 * factor) {
 					new_led[i] = 255;
 				} else {
-					new_led[i] += 10 * channels[i].factor;
+					new_led[i] += 100.0 * factor;
 				}
 				break;
 		}
@@ -315,7 +316,7 @@ void music()
 
    printf("%d %d %d (avg %d %d %d) op=(%d %d %d) ->r %d g %d b %d\n", fht_oct_out[oct_low], fht_oct_out[oct_mid], fht_oct_out[oct_high], freq_avg_mag[0], freq_avg_mag[1], freq_avg_mag[2], channels[0].op, channels[1].op, channels[2].op, new_led[2], new_led[1], new_led[0]);
 
-   set_led(new_led[2], new_led[1], new_led[0]);
+   set_led(new_led[2], new_led[0], new_led[1]);
 
 
 }

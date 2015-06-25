@@ -91,6 +91,9 @@ const struct ramp LED_ramps[] = {
 // Average magnitudes for frequency bins
 uint8_t freq_avg_mag[3];
 
+unsigned int hue = 0;
+unsigned int value = 0;
+
 void on_off_interrupt(void)
 {
 	// Potentiometer on/off enables/disables strobe from music mode
@@ -202,6 +205,81 @@ void strobe()
 	}
 }
 
+/******************************************************************************
+  This function converts HSV values to RGB values, scaled from 0 to maxBrightness
+
+  The ranges for the input variables are:
+  hue: 0-360
+  sat: 0-255
+  lig: 0-255
+
+  The ranges for the output variables are:
+  r: 0-maxBrightness
+  g: 0-maxBrightness
+  b: 0-maxBrightness
+  
+  r,g, and b are passed as pointers, because a function cannot have 3 return variables
+  Use it like this:
+  int hue, sat, val; 
+  unsigned char red, green, blue;
+  // set hue, sat and val
+  hsv2rgb(hue, sat, val, &red, &green, &blue, maxBrightness); //pass r, g, and b as the location where the result should be stored
+  // use r, b and g.
+ 
+  (c) Elco Jacobs, E-atelier Industrial Design TU/e, July 2011.
+  https://code.google.com/p/shiftpwm/source/browse/trunk/examples/ShiftPWM_Example1/hsv2rgb.cpp?r=3
+  
+ *****************************************************************************/
+
+
+void hsv2rgb(unsigned int hue, unsigned int sat, unsigned int val, 
+              unsigned char * r, unsigned char * g, unsigned char * b) { 
+    unsigned int H_accent = hue/60;
+    unsigned int bottom = ((255 - sat) * val)>>8;
+    unsigned int top = val;
+    unsigned char rising  = ((top-bottom)  *(hue%60   )  )  /  60  +  bottom;
+    unsigned char falling = ((top-bottom)  *(60-hue%60)  )  /  60  +  bottom;
+    
+    switch(H_accent) {
+        case 0:
+                *r = top;
+                *g = rising;
+                *b = bottom;
+        break;
+        
+        case 1:
+                *r = falling;
+                *g = top;
+                *b = bottom;
+        break;
+        
+        case 2:
+                *r = bottom;
+                *g = top;
+                *b = rising;
+        break;
+        
+        case 3:
+                *r = bottom;
+                *g = falling;
+                *b = top;
+        break;
+        
+        case 4:
+                *r = rising;
+                *g = bottom;
+                *b = top;
+        break;
+        
+        case 5:
+                *r = top;
+                *g = bottom;
+                *b = falling;
+        break;
+    }
+}
+
+
 void music()
 {
 	const int oct_low = 2;
@@ -233,7 +311,7 @@ void music()
 	sei();
 	TIMSK0 = timer;
 	ADCSRA = adcsra;
-	
+
 	Serial.write(255);
 	for (int i = 0; i < 8; i++) {
 		for (int j = 0; j < 16; j++) {
@@ -241,82 +319,40 @@ void music()
 		}
 	}	
 
-	enum operation { ERROR, RISE, SLOW_DECAY, FAST_DECAY };
-
-	struct {
-		int magidx;
-		int bias;
-		// int avgidx is equal to i;
-		enum operation op;
-		float diff;
-	} channels[] = {
-			{ oct_low , 0, ERROR },
-			{ oct_mid , 0, ERROR },
-			{ oct_high, 0, ERROR },
-	};
-
-	for (int i = 0; i < 3; i++) {
-		int bias = channels[i].bias;
-		int magidx = channels[i].magidx;
-		int diff;
-
-		// Remove constant component and remap to 0..255	
-
-		fht_oct_out[magidx] = map(fht_oct_out[magidx] - bias, 0, 255-bias, 0, 255);
-	
-		// Compare to moving average and make a decision based on that.
-		// 		value < avg: decay (faster as value is lower)
-		// 		value = avg: slow decay
-		// 		value > avg: rise exponentially
-		
-		diff = fht_oct_out[magidx] - freq_avg_mag[i];
-		if (abs(diff) < 5) {
-			// Roughly equal, so slow decay
-			channels[i].op = SLOW_DECAY;
-		} else if (diff < 0) {
-			channels[i].op = FAST_DECAY;
+	// Bass (oct_low) controls value with a fade
+	float diff = fht_oct_out[oct_low] - freq_avg_mag[0];
+	float factor = constrain(abs(diff) / 35.0, 0.01, 3.0);
+	if (abs(diff) < 5) {
+		// Roughly equal, so slow decay
+		if (value > 15) {
+			value -= 15;
 		} else {
-			channels[i].op = RISE;
+			value = 0;
 		}
-
-		channels[i].diff = abs(diff);
-
-		// Update moving average
-		freq_avg_mag[i] = (2 * freq_avg_mag[i] + fht_oct_out[magidx]) / 3;
+	} else if (diff < 0) {
+		if (value < 75.0 * factor) {
+			value = 0;
+		} else {
+			value -= 75.0 * factor;
+		}
+	} else {
+		if (value > 255.0 - 100.0 * factor) {
+			value = 255;
+		} else {
+			value += 100.0 * factor;
+		}
 	}
+	// Update moving average
+	freq_avg_mag[0] = (2 * freq_avg_mag[0] + fht_oct_out[oct_low]) / 3;
 
-	int new_led[3];
-	for (int i = 0; i < 3; i++) {
-		new_led[i] = (i == 0) ? led_g : ((i == 1) ? led_b : led_r);
-		float factor = constrain(channels[i].diff / ((i == 2) ? 45.0 : 35.0), 0.01, 3.0);
-		switch (channels[i].op) {
-			case SLOW_DECAY:
-				if (new_led[i] > 15) {
-					new_led[i] -= 15;
-				} else {
-					new_led[i] = 0;
-				}
-				break;
-			case FAST_DECAY:
-				if (new_led[i] < 75.0 * factor) {
-					new_led[i] = 0;
-				} else {
-					new_led[i] -= 75.0 * factor;
-				}
-				break;
-			case RISE:
-				if (new_led[i] > 255.0 - 100.0 * factor) {
-					new_led[i] = 255;
-				} else {
-					new_led[i] += 100.0 * factor;
-				}
-				break;
-		}
-	}	
+	// High freqs control hue
+	hue += abs(fht_oct_out[oct_high] - freq_avg_mag[2]);
+	hue %= 360;
+	freq_avg_mag[2] = (2 * freq_avg_mag[2] + fht_oct_out[oct_high]) / 3;
 
-   printf("%d %d %d (avg %d %d %d) op=(%d %d %d) ->r %d g %d b %d\n", fht_oct_out[oct_low], fht_oct_out[oct_mid], fht_oct_out[oct_high], freq_avg_mag[0], freq_avg_mag[1], freq_avg_mag[2], channels[0].op, channels[1].op, channels[2].op, new_led[2], new_led[1], new_led[0]);
-
-   set_led(new_led[2], new_led[0], new_led[1]);
+	uint8_t r, g, b;
+	hsv2rgb(hue, 255, value, &r, &g, &b);
+	set_led(r, g, b);
 
 
 }

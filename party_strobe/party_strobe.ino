@@ -322,18 +322,18 @@ void music()
 	// Bass (oct_low) controls value with a fade
 	float diff = fht_oct_out[oct_low] - freq_avg_mag[0];
 	float factor = constrain(abs(diff) / 35.0, 0.01, 3.0);
-	if (abs(diff) < 5) {
+	if (abs(diff) < 7) {
 		// Roughly equal, so slow decay
-		if (value > 15) {
-			value -= 15;
+		if (value > 30) {
+			value -= 30;
 		} else {
 			value = 0;
 		}
 	} else if (diff < 0) {
-		if (value < 75.0 * factor) {
+		if (value < 100.0 * factor) {
 			value = 0;
 		} else {
-			value -= 75.0 * factor;
+			value -= 100.0 * factor;
 		}
 	} else {
 		if (value > 255.0 - 100.0 * factor) {
@@ -346,7 +346,7 @@ void music()
 	freq_avg_mag[0] = (2 * freq_avg_mag[0] + fht_oct_out[oct_low]) / 3;
 
 	// High freqs control hue
-	hue += abs(fht_oct_out[oct_high] - freq_avg_mag[2]);
+	hue += abs(fht_oct_out[oct_high] - freq_avg_mag[2]) / 2;
 	hue %= 360;
 	freq_avg_mag[2] = (2 * freq_avg_mag[2] + fht_oct_out[oct_high]) / 3;
 

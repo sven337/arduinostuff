@@ -11,14 +11,17 @@
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <ArduinoOTA.h>
 
 #include "wifi_params.h"
 
-ESP8266WebServer websrv ( 80 );
+ESP8266WebServer websrv (80);
 WiFiUDP udp;
 const int udp_port = 2222;
 
 const int led = 13;
+
+//ArduinoOTA otasrv("heater-", 8266, true);
 
 void handleRoot() {
 	digitalWrite ( led, 1 );
@@ -39,7 +42,7 @@ void handleRoot() {
   </head>\
   <body>\
     <h1>Hello from ESP8266!</h1>\
-    <p>Uptime: %02d:%02d:%02d</p>\
+    <p>OTA'd Uptime: %02d:%02d:%02d</p>\
   </body>\
 </html>",
 
@@ -95,6 +98,8 @@ void setup ( void ) {
 	websrv.onNotFound ( handleNotFound );
 	websrv.begin();
 	Serial.println ( "HTTP websrv started" );
+
+	//otasrv.setup();
 }
 
 void udp_send(const char *str)
@@ -140,6 +145,7 @@ void parse_cmd(const char *buf)
 }
 
 void loop ( void ) {
+	//otasrv.handle();
 	websrv.handleClient();
 
 	char packetBuffer[255];

@@ -2,18 +2,21 @@
  *  This sketch sends data via HTTP GET requests to data.sparkfun.com service.
  *
  *  You need to get streamId and privateKey at data.sparkfun.com and paste them
- *  below. Or just customize this script to talk to other HTTP servers.
+ *  below. Or just customize this script to talk to other HTTP websrvs.
  *
  */
 
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 
 #include "wifi_params.h"
 
-ESP8266WebServer server ( 80 );
+ESP8266WebServer websrv ( 80 );
+WiFiUDP udp;
+const int udp_port = 2222;
 
 const int led = 13;
 
@@ -42,7 +45,7 @@ void handleRoot() {
 
 		hr, min % 60, sec % 60
 	);
-	server.send ( 200, "text/html", temp );
+	websrv.send ( 200, "text/html", temp );
 	digitalWrite ( led, 0 );
 }
 
@@ -50,18 +53,18 @@ void handleNotFound() {
 	digitalWrite ( led, 1 );
 	String message = "File Not Found\n\n";
 	message += "URI: ";
-	message += server.uri();
+	message += websrv.uri();
 	message += "\nMethod: ";
-	message += ( server.method() == HTTP_GET ) ? "GET" : "POST";
+	message += ( websrv.method() == HTTP_GET ) ? "GET" : "POST";
 	message += "\nArguments: ";
-	message += server.args();
+	message += websrv.args();
 	message += "\n";
 
-	for ( uint8_t i = 0; i < server.args(); i++ ) {
-		message += " " + server.argName ( i ) + ": " + server.arg ( i ) + "\n";
+	for ( uint8_t i = 0; i < websrv.args(); i++ ) {
+		message += " " + websrv.argName ( i ) + ": " + websrv.arg ( i ) + "\n";
 	}
 
-	server.send ( 404, "text/plain", message );
+	websrv.send ( 404, "text/plain", message );
 	digitalWrite ( led, 0 );
 }
 
@@ -84,36 +87,86 @@ void setup ( void ) {
 	Serial.print ( "IP address: " );
 	Serial.println ( WiFi.localIP() );
 
-
-	server.on ( "/", handleRoot );
-	server.on ( "/test.svg", drawGraph );
-	server.on ( "/inline", []() {
-		server.send ( 200, "text/plain", "this works as well" );
+	udp.begin(udp_port);
+	websrv.on ( "/", handleRoot );
+	websrv.on ( "/inline", []() {
+		websrv.send ( 200, "text/plain", "this works as well" );
 	} );
-	server.onNotFound ( handleNotFound );
-	server.begin();
-	Serial.println ( "HTTP server started" );
+	websrv.onNotFound ( handleNotFound );
+	websrv.begin();
+	Serial.println ( "HTTP websrv started" );
+}
+
+void udp_send(const char *str)
+{
+	udp.beginPacket(udp.remoteIP(), udp.remotePort());
+	udp.write(str);
+	udp.endPacket();
+}
+
+void change_pwm(const char *buf)
+{
+	char str[255];
+	int duty_cycle = atoi(buf);
+	Serial.print("Received UDP request to set duty cycle to ");
+	Serial.print(duty_cycle);
+
+	if (duty_cycle >= 0 && duty_cycle <= 100) {
+		sprintf(str, "Setting duty cycle to %d\n", duty_cycle);
+		udp_send(str);
+		// XXX actually set duty cycle :)
+	} else {
+		sprintf(str, "Requested invalid duty cycle %d\n", duty_cycle);
+		udp_send(str);
+	}
+
+}
+
+void udp_send_status_report()
+{
+	char str[255];
+	sprintf(str, "Nothing to report");
+	udp_send(str);
+}
+
+void parse_cmd(const char *buf)
+{
+	if (!strncmp(buf, "PWM ", 4)) {
+		buf += 4;
+		change_pwm(buf);
+	} else if (!strncmp(buf, "STATUS", 6)) {
+		udp_send_status_report();
+	}
 }
 
 void loop ( void ) {
-	server.handleClient();
-}
+	websrv.handleClient();
 
-void drawGraph() {
-	String out = "";
-	char temp[100];
-	out += "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"400\" height=\"150\">\n";
- 	out += "<rect width=\"400\" height=\"150\" fill=\"rgb(250, 230, 210)\" stroke-width=\"1\" stroke=\"rgb(0, 0, 0)\" />\n";
- 	out += "<g stroke=\"black\">\n";
- 	int y = rand() % 130;
- 	for (int x = 10; x < 390; x+= 10) {
- 		int y2 = rand() % 130;
- 		sprintf(temp, "<line x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\" stroke-width=\"1\" />\n", x, 140 - y, x + 10, 140 - y2);
- 		out += temp;
- 		y = y2;
- 	}
-	out += "</g>\n</svg>\n";
+	char packetBuffer[255];
+	int packetSize = udp.parsePacket();
+	if (packetSize) {
+		Serial.print("Received packet of size ");
+		Serial.print(packetSize);
+		Serial.print(" from ");
+		IPAddress remoteIp = udp.remoteIP();
+		Serial.print(remoteIp);
+		Serial.print(", port ");
+		Serial.println(udp.remotePort());
 
-	server.send ( 200, "image/svg+xml", out);
+		// read the packet into packetBufffer
+		int len = udp.read(packetBuffer, 255);
+		if (len > 0) {
+			packetBuffer[len] = 0;
+		}
+		Serial.print("Contents: ");
+		Serial.println(packetBuffer);
+
+		if (strncmp(packetBuffer, appcode, strlen(appcode))) {
+			// Packet doesn't have security code, ignore it.
+			udp.flush();
+		} else {
+			parse_cmd(&packetBuffer[strlen(appcode)]);
+		}
+	}
 }
 

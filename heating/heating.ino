@@ -21,7 +21,8 @@ const int udp_port = 2222;
 
 const int led = 13;
 
-//ArduinoOTA otasrv("heater-", 8266, true);
+
+ArduinoOTA otasrv("heater-", 8266, true);
 
 void handleRoot() {
 	digitalWrite ( led, 1 );
@@ -42,11 +43,11 @@ void handleRoot() {
   </head>\
   <body>\
     <h1>Hello from ESP8266!</h1>\
-    <p>OTA'd Uptime: %02d:%02d:%02d</p>\
+    <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d</p>\
   </body>\
 </html>",
 
-		hr, min % 60, sec % 60
+		__DATE__, __TIME__, hr, min % 60, sec % 60
 	);
 	websrv.send ( 200, "text/html", temp );
 	digitalWrite ( led, 0 );
@@ -99,7 +100,7 @@ void setup ( void ) {
 	websrv.begin();
 	Serial.println ( "HTTP websrv started" );
 
-	//otasrv.setup();
+	otasrv.setup();
 }
 
 void udp_send(const char *str)
@@ -145,7 +146,7 @@ void parse_cmd(const char *buf)
 }
 
 void loop ( void ) {
-	//otasrv.handle();
+	otasrv.handle();
 	websrv.handleClient();
 
 	char packetBuffer[255];

@@ -1,11 +1,3 @@
-/*
- *  This sketch sends data via HTTP GET requests to data.sparkfun.com service.
- *
- *  You need to get streamId and privateKey at data.sparkfun.com and paste them
- *  below. Or just customize this script to talk to other HTTP websrvs.
- *
- */
-
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
@@ -19,13 +11,14 @@ ESP8266WebServer websrv (80);
 WiFiUDP udp;
 const int udp_port = 2222;
 
-const int led = 13;
+const int chaudiere = 4;
+const int pushbtn = 12;
 
+int pwm;
 
 ArduinoOTA otasrv("heater-", 8266, true);
 
 void handleRoot() {
-	digitalWrite ( led, 1 );
 	char temp[400];
 	int sec = millis() / 1000;
 	int min = sec / 60;
@@ -50,11 +43,9 @@ void handleRoot() {
 		__DATE__, __TIME__, hr, min % 60, sec % 60
 	);
 	websrv.send ( 200, "text/html", temp );
-	digitalWrite ( led, 0 );
 }
 
 void handleNotFound() {
-	digitalWrite ( led, 1 );
 	String message = "File Not Found\n\n";
 	message += "URI: ";
 	message += websrv.uri();
@@ -69,12 +60,12 @@ void handleNotFound() {
 	}
 
 	websrv.send ( 404, "text/plain", message );
-	digitalWrite ( led, 0 );
 }
 
 void setup ( void ) {
-	pinMode ( led, OUTPUT );
-	digitalWrite ( led, 0 );
+	pinMode ( chaudiere, OUTPUT );
+	pinMode(pushbtn, INPUT_PULLUP);
+	digitalWrite ( chaudiere, 0 );
 	Serial.begin ( 115200 );
 	WiFi.begin ( ssid, password );
 	Serial.println ( "" );
@@ -115,12 +106,18 @@ void change_pwm(const char *buf)
 	char str[255];
 	int duty_cycle = atoi(buf);
 	Serial.print("Received UDP request to set duty cycle to ");
-	Serial.print(duty_cycle);
+	Serial.println(duty_cycle);
 
 	if (duty_cycle >= 0 && duty_cycle <= 100) {
+		pwm = duty_cycle;
 		sprintf(str, "Setting duty cycle to %d\n", duty_cycle);
 		udp_send(str);
 		// XXX actually set duty cycle :)
+		if (duty_cycle == 100) {
+			digitalWrite(chaudiere, 0);
+		} else {
+			digitalWrite(chaudiere, 1);
+		}
 	} else {
 		sprintf(str, "Requested invalid duty cycle %d\n", duty_cycle);
 		udp_send(str);
@@ -142,13 +139,26 @@ void parse_cmd(const char *buf)
 		change_pwm(buf);
 	} else if (!strncmp(buf, "STATUS", 6)) {
 		udp_send_status_report();
-	}
+	} else if (!strncmp(buf, "ON", 2)) {
+		change_pwm("100");
+	} else if (!strncmp(buf, "OFF", 3)) {
+		change_pwm("0");
+	} 
 }
 
 void loop ( void ) {
 	otasrv.handle();
 	websrv.handleClient();
 
+	if (!digitalRead(pushbtn)) {
+		while(!digitalRead(pushbtn)) ;
+
+		if (pwm) { 
+			change_pwm("0");
+		} else {
+			change_pwm("100");
+		}
+	}
 	char packetBuffer[255];
 	int packetSize = udp.parsePacket();
 	if (packetSize) {

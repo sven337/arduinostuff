@@ -11,36 +11,43 @@ ESP8266WebServer websrv (80);
 WiFiUDP udp;
 const int udp_port = 2222;
 
-const int chaudiere = 4;
+const int chaudiere = 14;
 const int pushbtn = 12;
 
 int pwm;
 
+long int last_reboot_at;
+
 ArduinoOTA otasrv("heater-", 8266, true);
 
 void handleRoot() {
-	char temp[400];
+	char temp[1024];
 	int sec = millis() / 1000;
 	int min = sec / 60;
 	int hr = min / 60;
 
-	snprintf ( temp, 400,
+	int reboot_sec = last_reboot_at / 1000;
+	int reboot_min = reboot_sec / 60;
+	int reboot_hour = reboot_min / 60;
+	snprintf ( temp, 1024,
 
 "<html>\
   <head>\
-    <meta http-equiv='refresh' content='5'/>\
-    <title>ESP8266 Demo</title>\
+    <meta http-equiv='refresh' content='30'/>\
+    <title>Regulation chaudiere ESP8266</title>\
     <style>\
       body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }\
     </style>\
   </head>\
   <body>\
     <h1>Hello from ESP8266!</h1>\
-    <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d</p>\
+    <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d</p><p>Last reboot at %02d:%02d:%02d timestamp</p>\
+	<p>Current power is %d</p> \
   </body>\
 </html>",
 
-		__DATE__, __TIME__, hr, min % 60, sec % 60
+		__DATE__, __TIME__, hr, min % 60, sec % 60, reboot_hour, reboot_min % 60, reboot_sec % 60,
+		pwm
 	);
 	websrv.send ( 200, "text/html", temp );
 }
@@ -65,9 +72,13 @@ void handleNotFound() {
 void setup ( void ) {
 	pinMode ( chaudiere, OUTPUT );
 	pinMode(pushbtn, INPUT_PULLUP);
-	digitalWrite ( chaudiere, 0 );
+	digitalWrite(chaudiere, 1);
 	Serial.begin ( 115200 );
 	WiFi.begin ( ssid, password );
+	IPAddress myip(192, 168, 0, 33);
+	IPAddress gw(192, 168, 0, 254);
+	IPAddress subnet(255, 255, 255, 0);
+	WiFi.config(myip, gw, subnet);
 	Serial.println ( "" );
 
 	// Wait for connection
@@ -92,6 +103,8 @@ void setup ( void ) {
 	Serial.println ( "HTTP websrv started" );
 
 	otasrv.setup();
+
+	last_reboot_at = millis();
 }
 
 void udp_send(const char *str)
@@ -112,7 +125,6 @@ void change_pwm(const char *buf)
 		pwm = duty_cycle;
 		sprintf(str, "Setting duty cycle to %d\n", duty_cycle);
 		udp_send(str);
-		// XXX actually set duty cycle :)
 		if (duty_cycle == 100) {
 			digitalWrite(chaudiere, 0);
 		} else {

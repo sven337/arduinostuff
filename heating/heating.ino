@@ -2,7 +2,7 @@
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
+#define UPDATER_NO_MDNS
 #include <ArduinoOTA.h>
 
 #include "wifi_params.h"
@@ -16,64 +16,37 @@ const int pushbtn = 12;
 
 int pwm;
 
-long int last_reboot_at;
+unsigned long int forced_heating_until = 0;
 
-ArduinoOTA otasrv("heater-", 8266, true);
-
-void handleRoot() {
+static void handleRoot() {
 	char temp[1024];
 	int sec = millis() / 1000;
 	int min = sec / 60;
 	int hr = min / 60;
 
-	int reboot_sec = last_reboot_at / 1000;
-	int reboot_min = reboot_sec / 60;
-	int reboot_hour = reboot_min / 60;
 	snprintf ( temp, 1024,
 
-"<html>\
-  <head>\
-    <meta http-equiv='refresh' content='30'/>\
-    <title>Regulation chaudiere ESP8266</title>\
-    <style>\
-      body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }\
-    </style>\
-  </head>\
-  <body>\
+"<html><head><title>ESP8266</title></head><body>\
     <h1>Hello from ESP8266!</h1>\
-    <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d</p><p>Last reboot at %02d:%02d:%02d timestamp</p>\
-	<p>Current power is %d</p> \
-  </body>\
-</html>",
+    <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d = %d ms</p>\
+	<p>Current power is %d, %sforced until %d</p> \
+  </body></html>",
 
-		__DATE__, __TIME__, hr, min % 60, sec % 60, reboot_hour, reboot_min % 60, reboot_sec % 60,
-		pwm
+		__DATE__, __TIME__, hr, min % 60, sec % 60, millis(),
+		pwm, (millis() < forced_heating_until ? "" : "not ", forced_heating_until)
 	);
 	websrv.send ( 200, "text/html", temp );
 }
 
-void handleNotFound() {
-	String message = "File Not Found\n\n";
-	message += "URI: ";
-	message += websrv.uri();
-	message += "\nMethod: ";
-	message += ( websrv.method() == HTTP_GET ) ? "GET" : "POST";
-	message += "\nArguments: ";
-	message += websrv.args();
-	message += "\n";
-
-	for ( uint8_t i = 0; i < websrv.args(); i++ ) {
-		message += " " + websrv.argName ( i ) + ": " + websrv.arg ( i ) + "\n";
-	}
-
-	websrv.send ( 404, "text/plain", message );
+int analogRead(uint8_t pin)
+{
 }
 
 void setup ( void ) {
 	pinMode ( chaudiere, OUTPUT );
 	pinMode(pushbtn, INPUT_PULLUP);
 	digitalWrite(chaudiere, 1);
-	Serial.begin ( 115200 );
+	Serial.begin ( 78400 );
 	WiFi.begin ( ssid, password );
 	IPAddress myip(192, 168, 0, 33);
 	IPAddress gw(192, 168, 0, 254);
@@ -88,23 +61,16 @@ void setup ( void ) {
 	}
 
 	Serial.println ( "" );
-	Serial.print ( "Connected to " );
+	Serial.print ( "Cnnectd to " );
 	Serial.println ( ssid );
-	Serial.print ( "IP address: " );
+	Serial.print ( "IP " );
 	Serial.println ( WiFi.localIP() );
 
 	udp.begin(udp_port);
 	websrv.on ( "/", handleRoot );
-	websrv.on ( "/inline", []() {
-		websrv.send ( 200, "text/plain", "this works as well" );
-	} );
-	websrv.onNotFound ( handleNotFound );
+
 	websrv.begin();
-	Serial.println ( "HTTP websrv started" );
-
-	otasrv.setup();
-
-	last_reboot_at = millis();
+	ArduinoOTA.begin();
 }
 
 void udp_send(const char *str)
@@ -114,12 +80,16 @@ void udp_send(const char *str)
 	udp.endPacket();
 }
 
-void change_pwm(const char *buf)
+void change_pwm(const void *buf)
 {
 	char str[255];
-	int duty_cycle = atoi(buf);
-	Serial.print("Received UDP request to set duty cycle to ");
+	int duty_cycle = atoi((const char *)buf);
+	Serial.print("Recvd UDP req to set duty cycle to ");
 	Serial.println(duty_cycle);
+
+	if (millis() < forced_heating_until) {
+		return;
+	}
 
 	if (duty_cycle >= 0 && duty_cycle <= 100) {
 		pwm = duty_cycle;
@@ -131,20 +101,20 @@ void change_pwm(const char *buf)
 			digitalWrite(chaudiere, 1);
 		}
 	} else {
-		sprintf(str, "Requested invalid duty cycle %d\n", duty_cycle);
+		sprintf(str, "Req.invalid duty cycle %d\n", duty_cycle);
 		udp_send(str);
 	}
 
 }
 
-void udp_send_status_report()
+static void udp_send_status_report(void)
 {
-	char str[255];
-	sprintf(str, "Nothing to report");
+	char str[50];
+	sprintf(str, "PWM %d", pwm);
 	udp_send(str);
 }
 
-void parse_cmd(const char *buf)
+static void parse_cmd(const char *buf)
 {
 	if (!strncmp(buf, "PWM ", 4)) {
 		buf += 4;
@@ -159,43 +129,39 @@ void parse_cmd(const char *buf)
 }
 
 void loop ( void ) {
-	otasrv.handle();
+	ArduinoOTA.handle();
 	websrv.handleClient();
 
 	if (!digitalRead(pushbtn)) {
 		while(!digitalRead(pushbtn)) ;
+		
+		change_pwm("100");
 
-		if (pwm) { 
-			change_pwm("0");
-		} else {
-			change_pwm("100");
+		// Force heating for 20 minutes
+		forced_heating_until = millis() + 20 * 60 * 1000; 
+
+		// On overflow, put burner at full power, but don't set 
+		// a end date, so the next change request will be accepted
+		if (forced_heating_until < millis()) {
+			forced_heating_until = 0;
 		}
+
 	}
+
+	if (millis() > forced_heating_until) {
+		forced_heating_until = 0;
+	}
+
 	char packetBuffer[255];
 	int packetSize = udp.parsePacket();
 	if (packetSize) {
-		Serial.print("Received packet of size ");
-		Serial.print(packetSize);
-		Serial.print(" from ");
-		IPAddress remoteIp = udp.remoteIP();
-		Serial.print(remoteIp);
-		Serial.print(", port ");
-		Serial.println(udp.remotePort());
-
 		// read the packet into packetBufffer
 		int len = udp.read(packetBuffer, 255);
 		if (len > 0) {
 			packetBuffer[len] = 0;
 		}
-		Serial.print("Contents: ");
-		Serial.println(packetBuffer);
 
-		if (strncmp(packetBuffer, appcode, strlen(appcode))) {
-			// Packet doesn't have security code, ignore it.
-			udp.flush();
-		} else {
-			parse_cmd(&packetBuffer[strlen(appcode)]);
-		}
+		parse_cmd(&packetBuffer[0]);
 	}
 }
 

@@ -17,6 +17,7 @@ const int pushbtn = 12;
 int pwm;
 
 unsigned long int forced_heating_until = 0;
+unsigned long int send_next_ping_at = 15*60*1000;
 
 static void handleRoot() {
 	char temp[1024];
@@ -33,7 +34,7 @@ static void handleRoot() {
   </body></html>",
 
 		__DATE__, __TIME__, hr, min % 60, sec % 60, millis(),
-		pwm, (millis() < forced_heating_until ? "" : "not ", forced_heating_until)
+		pwm, (forced_heating_until ? "" : "not "), forced_heating_until
 	);
 	websrv.send ( 200, "text/html", temp );
 }
@@ -132,9 +133,16 @@ void loop ( void ) {
 	ArduinoOTA.handle();
 	websrv.handleClient();
 
+	bool force_heating = false;
+
 	if (!digitalRead(pushbtn)) {
-		while(!digitalRead(pushbtn)) ;
-		
+		delay(500);
+		if (!digitalRead(pushbtn)) {
+			force_heating = true;
+		}
+	}
+
+	if (force_heating) {
 		change_pwm("100");
 
 		// Force heating for 20 minutes
@@ -145,11 +153,15 @@ void loop ( void ) {
 		if (forced_heating_until < millis()) {
 			forced_heating_until = 0;
 		}
-
 	}
 
 	if (millis() > forced_heating_until) {
 		forced_heating_until = 0;
+	}
+
+	if (millis() > send_next_ping_at) {
+		udp_send("ping");
+		send_next_ping_at = millis() + 15L * 60L * 1000L;
 	}
 
 	char packetBuffer[255];

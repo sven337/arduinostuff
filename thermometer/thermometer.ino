@@ -23,6 +23,10 @@ static unsigned long last_ping_at = 0;
 
 int init_failed = 0;
 
+//const uint8_t thermometer_identification_letter = 'L'; // "living room"
+//const uint8_t thermometer_identification_letter = 'E'; // "exterior"
+const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
+
 ISR(WDT_vect)
 {
 	Sleepy::watchdogEvent();
@@ -48,9 +52,9 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 }
 
 
-int radio_send_bat(uint16_t bat, uint8_t type)
+int radio_send_bat(uint16_t bat)
 {
-	return radio_send('B', type, (bat >> 8) & 0xFF, bat & 0xFF);
+	return radio_send('B', thermometer_identification_letter, (bat >> 8) & 0xFF, bat & 0xFF);
 }
 
 void setup(){
@@ -122,7 +126,7 @@ void loop()
 	}
 
 	uint16_t battery_level = analogRead(BATTERY_PIN);
-	bool fail = radio_send_bat(battery_level, 'N');
+	bool fail = radio_send_bat(battery_level);
 
 	if (fail) {
 		digitalWrite(LED_RED, 1);
@@ -169,15 +173,12 @@ void loop()
     else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
     else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
     //// default is 12 bit resolution, 750 ms conversion time
-	printf("Temperature is %f\n", (float)raw/16.0);
+	printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
 
-	i = 3;
-	if (battery_voltage(battery_level) >= 1.3f) {
-		i = 50;
-	}
+	i = 100;
 
 	while (i--) {
-		if (!radio_send('T', 'N', (raw >> 8) & 0xFF, raw & 0xFF)) {
+		if (!radio_send('T', thermometer_identification_letter, (raw >> 8) & 0xFF, raw & 0xFF)) {
 			break;
 		}
 		delay(2000);
@@ -188,7 +189,7 @@ void loop()
 	digitalWrite(LED_RED, 0);
 
 	for (int i = 1; i < 15L*60L*1000L / 32768L; i++) {
-		if (battery_voltage(battery_level) >= 1.5f) {
+		if (battery_voltage(battery_level) >= 1.4f) {
 			// Battery is overcharged, try to waste energy!
 			delay(10000);
 		}

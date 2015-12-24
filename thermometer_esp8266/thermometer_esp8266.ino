@@ -2,8 +2,9 @@
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
-#define UPDATER_NO_MDNS
+#include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
+#include <ESP8266HTTPClient.h>
 
 #include "wifi_params.h"
 
@@ -17,7 +18,8 @@ const int DS18B20_PIN = 14;
 
 float temperature;
 
-unsigned long int send_next_ping_at = 15*60*1000;
+unsigned long int send_temperature_at = 1000;
+unsigned long int read_temperature_at = 0;
 
 OneWire ds(DS18B20_PIN);
 
@@ -54,6 +56,8 @@ void setup ( void ) {
 	IPAddress subnet(255, 255, 255, 0);
 	WiFi.config(myip, gw, subnet);
 	Serial.println ( "" );
+	Serial.print("Connecting to ");
+	Serial.print(ssid); Serial.print(" "); Serial.print(password);
 
 	// Wait for connection
 	while ( WiFi.status() != WL_CONNECTED ) {
@@ -95,13 +99,77 @@ static void parse_cmd(const char *buf)
 	} 
 }
 
+void send_temperature_update()
+{
+	HTTPClient http;
+	char URI[150];
+
+	sprintf(URI, "http://192.168.0.6:5000/update/temperature/bed/%d.%d", (int)temperature, (int)((temperature-(int)temperature)*100.0));
+	Serial.print("[HTTP] begin...\n");
+	Serial.print(URI);
+
+	http.begin(URI); 
+
+	Serial.print("[HTTP] GET...\n");
+	int httpCode = http.GET();
+
+	// httpCode will be negative on error
+	if(httpCode) {
+		// HTTP header has been send and Server response header has been handled
+		Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+	}
+}
+
 void loop ( void ) {
 	ArduinoOTA.handle();
 	websrv.handleClient();
 
-	if (millis() > send_next_ping_at) {
-		udp_send("ping");
-		send_next_ping_at = millis() + 15L * 60L * 1000L;
+	if (millis() > read_temperature_at) {
+		uint8_t addr[8];
+		uint8_t data[12];
+		int i = 4;
+		while(!ds.search(addr) && i--) {
+			Serial.println("No more addresses.");
+			ds.reset_search();
+			delay(250);
+		}
+		if (!i) {
+			return;
+		}
+
+		ds.reset();
+		ds.select(addr);
+		ds.write(0x44, 1);
+		delay(800);
+		uint8_t present = ds.reset();
+		ds.select(addr);    
+		ds.write(0xBE);
+
+		Serial.print("  Data = ");
+		Serial.print(present, HEX);
+		Serial.print(" ");
+		for (int i = 0; i < 9; i++) {
+			data[i] = ds.read();
+			Serial.print(data[i], HEX);
+			Serial.print(" ");
+		}
+		Serial.println();
+
+		// Convert the data to actual temperature
+		// because the result is a 16 bit signed integer, it should
+		// be stored to an "int16_t" type, which is always 16 bits
+		// even when compiled on a 32 bit processor.
+		int16_t raw = (data[1] << 8) | data[0];
+		byte cfg = (data[4] & 0x60);
+		// at lower res, the low bits are undefined, so let's zero them
+		if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+		else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+		else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+		//// default is 12 bit resolution, 750 ms conversion time
+		printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
+		temperature = raw/16.0;
+
+		read_temperature_at = millis() + 60L * 1000L;
 	}
 
 	char packetBuffer[255];
@@ -115,50 +183,12 @@ void loop ( void ) {
 
 		parse_cmd(&packetBuffer[0]);
 	}
-
-	uint8_t addr[8];
-	uint8_t data[12];
-	int i = 4;
-	while(!ds.search(addr) && i--) {
-		Serial.println("No more addresses.");
-		ds.reset_search();
-		delay(250);
+	
+	if (millis() > send_temperature_at) {
+		send_temperature_at = millis() + 15L * 60L * 1000L;
+		send_temperature_update();
 	}
-    if (!i) {
-		return;
-	}
+	
 
-	ds.reset();
-	ds.select(addr);
-	ds.write(0x44, 1);
-	delay(800);
-	uint8_t present = ds.reset();
-	ds.select(addr);    
-	ds.write(0xBE);
 
-	Serial.print("  Data = ");
-	Serial.print(present, HEX);
-	Serial.print(" ");
-	for (int i = 0; i < 9; i++) {
-		data[i] = ds.read();
-		Serial.print(data[i], HEX);
-		Serial.print(" ");
-	}
-	Serial.println();
-
-	// Convert the data to actual temperature
-	// because the result is a 16 bit signed integer, it should
-	// be stored to an "int16_t" type, which is always 16 bits
-	// even when compiled on a 32 bit processor.
-	int16_t raw = (data[1] << 8) | data[0];
-    byte cfg = (data[4] & 0x60);
-    // at lower res, the low bits are undefined, so let's zero them
-    if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
-    else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
-    else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
-    //// default is 12 bit resolution, 750 ms conversion time
-	printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
-	temperature = raw/16.0;
-
-	delay(1000);
 }

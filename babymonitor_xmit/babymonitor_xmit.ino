@@ -13,7 +13,15 @@
 
 
 #include <SPI.h>
- 
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiUdp.h>
+#include "wifi_params.h"
+
+WiFiUDP udp;
+const int udp_target_port = 45990;
+const IPAddress IP_target(192,168,0,2);
+
 // Pin definitions: 
 const int scePin = 15;   	// SCE - Chip select
 /* HW definition of alternate function:
@@ -71,12 +79,33 @@ void sample_isr(void)
 void setup(void)
 { 
 	Serial.begin(115200);
-	spiBegin(); 
+	Serial.println("hi");
 
+	WiFi.begin ( ssid, password );
+	IPAddress myip(192, 168, 0, 32);
+	IPAddress gw(192, 168, 0, 1);
+	IPAddress subnet(255, 255, 255, 0);
+	WiFi.config(myip, gw, subnet);
+	Serial.print("Connecting to ");
+	Serial.print(ssid); Serial.print(" "); Serial.print(password);
+	// Wait for connection
+	while ( WiFi.status() != WL_CONNECTED ) {
+		delay ( 500 );
+		Serial.print ( "." );
+	}
+
+	Serial.println ( "" );
+	Serial.print ( "Cnnectd to " );
+	Serial.println ( ssid );
+	Serial.print ( "IP " );
+	Serial.println ( WiFi.localIP() );
+
+	spiBegin(); 
+	
 	timer1_isr_init();
 	timer1_attachInterrupt(sample_isr);
 	timer1_enable(TIM_DIV16, TIM_EDGE, TIM_LOOP);
-	timer1_write(clockCyclesPerMicrosecond() / 16 * 125);
+	timer1_write(clockCyclesPerMicrosecond() / 16 * 100); //100us = 10kHz sampling freq
 	Serial.println("setup done");
 }
 
@@ -84,8 +113,9 @@ void setup(void)
 void loop() 
 {
   if (send_samples_now) {
-	  Serial.print("Output at ");
-	  Serial.println(millis());
+	  udp.beginPacket(IP_target, udp_target_port);
+	  udp.write((const uint8_t *)(&adc_buf[!current_adc_buf][0]), sizeof(adc_buf[0]));
+	  udp.endPacket();
 	  send_samples_now = 0;
   }	  
 }

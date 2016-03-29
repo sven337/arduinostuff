@@ -30,7 +30,7 @@ static const uint8_t MISO  = 12;
 static const uint8_t SCK   = 14;
 */
 
-uint16_t adc_buf[2][25];
+uint16_t adc_buf[2][512];
 int current_adc_buf;
 int adc_buf_pos;
 int send_samples_now;

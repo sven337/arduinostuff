@@ -3,6 +3,21 @@
  * usage: udpserver <port>
  */
 
+/* 
+ *  Using WAV header from:
+ *   make_wav.c
+ * Creates a WAV file from an array of ints.
+ * Output is monophonic, signed 16-bit samples
+ * copyright
+ * Fri Jun 18 16:36:23 PDT 2010 Kevin Karplus
+ * Creative Commons license Attribution-NonCommercial
+ *  http://creativecommons.org/licenses/by-nc/3.0/
+ */
+ 
+/* information about the WAV file format from
+    http://ccrma.stanford.edu/courses/422/projects/WaveFormat/
+ */
+
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -13,7 +28,56 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define BUFSIZE 1024
+#define BUFSIZE 2048
+const int portno = 45990;
+
+ 
+void write_wav_header(FILE *wav_file, unsigned long num_samples, int s_rate)
+{
+    unsigned int sample_rate;
+    uint16_t num_channels;
+    unsigned int bytes_per_sample;
+    unsigned int byte_rate;
+    unsigned long i;    /* counter for samples */
+ 
+    num_channels = 1;   /* monoaural */
+    bytes_per_sample = 2;
+ 
+    if (s_rate<=0) sample_rate = 44100;
+    else sample_rate = (unsigned int) s_rate;
+ 
+    byte_rate = sample_rate*num_channels*bytes_per_sample;
+ 
+    /* write RIFF header */
+    fwrite("RIFF", 1, 4, wav_file);
+	uint32_t tmp = 36 + 2 * num_samples;
+	fwrite(&tmp, 4, 1, wav_file); 
+    fwrite("WAVE", 1, 4, wav_file);
+ 
+    /* write fmt  subchunk */
+    fwrite("fmt ", 1, 4, wav_file);
+	tmp = 16; // SubChunk1Size is 16
+	fwrite(&tmp, 4, 1, wav_file);
+	tmp = 1; // PCM is format 1
+	fwrite(&tmp, 2, 1, wav_file);
+	fwrite(&num_channels, 2, 1, wav_file);
+	fwrite(&sample_rate, 4, 1, wav_file);
+	fwrite(&byte_rate, 4, 1, wav_file);
+	tmp = num_channels * bytes_per_sample; // block align
+	fwrite(&tmp, 2, 1, wav_file);
+	tmp = 8*bytes_per_sample; //bits/sample
+	fwrite(&tmp, 2, 1, wav_file);
+
+    /* write data subchunk */
+    fwrite("data", 1, 4, wav_file);
+	tmp = bytes_per_sample * num_samples * num_channels;
+	fwrite(&tmp, 1, 4, wav_file);
+}
+
+void append_sample(FILE *f, uint16_t sample)
+{
+	fwrite(&sample, 2, 1, f);
+}
 
 /*
  * error - wrapper for perror
@@ -25,7 +89,6 @@ void error(char *msg) {
 
 int main(int argc, char **argv) {
   int sockfd; /* socket */
-  int portno; /* port to listen on */
   int clientlen; /* byte size of client's address */
   struct sockaddr_in serveraddr; /* server's addr */
   struct sockaddr_in clientaddr; /* client addr */
@@ -34,15 +97,6 @@ int main(int argc, char **argv) {
   char *hostaddrp; /* dotted decimal host addr string */
   int optval; /* flag value for setsockopt */
   int n; /* message byte size */
-
-  /* 
-   * check command line arguments 
-   */
-  if (argc != 2) {
-    fprintf(stderr, "usage: %s <port>\n", argv[0]);
-    exit(1);
-  }
-  portno = atoi(argv[1]);
 
   /* 
    * socket: create the parent socket 
@@ -80,7 +134,8 @@ int main(int argc, char **argv) {
    */
   clientlen = sizeof(clientaddr);
 
-  FILE *out = fopen("./out", "w");
+  FILE *out = fopen("./out.wav", "w");
+  write_wav_header(out,  -1, 12500);
   while (1) {
 
     /*
@@ -110,11 +165,7 @@ int main(int argc, char **argv) {
 		printf("%u ", value);
 		int16_t v = (value - 0x1000/2) << 4;
 		printf("(%d) ", v);
-		fwrite(&v, 2, 1, out);
-		if (v < 0) {
-			printf("\nAIEAIEAIE\n");
-		}
-
+		append_sample(out, v);
 	}
 	printf("\n");
 	fflush(out);

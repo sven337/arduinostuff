@@ -37,6 +37,12 @@ int current_adc_buf; // which data buffer is being used for the ADC (the other i
 unsigned int adc_buf_pos; // position in the ADC data buffer
 int send_samples_now; // flag to signal that a buffer is ready to be sent
 
+#define SILENCE_EMA_WEIGHT 1024
+#define ENVELOPE_EMA_WEIGHT 2
+int32_t silence_value = 2048; // computed as an exponential moving average of the signal
+int32_t envelope_value = 100; // computed as an EMA of the abs(signal-silence_value)
+uint16_t envelope_threshold = 100; // envelope threshold to trigger data sending
+
 void spiBegin(void) 
 {
   pinMode(scePin, OUTPUT);
@@ -133,10 +139,33 @@ void loop()
 {
 	ArduinoOTA.handle();
 	if (send_samples_now) {
+		/* We're ready to send a buffer of samples over wifi. Decide if it has to happen or not,
+		   that is, if the sound level is above a certain threshold. */
+
+		// Update silence and envelope computations
+		uint16_t number_of_samples = sizeof(adc_buf[0])/sizeof(adc_buf[0][0]);
+		int32_t accum_silence = 0;
+		int32_t accum_envelope = 0;
+		for (unsigned int i = 0; i < number_of_samples; i++) {
+			int32_t val = adc_buf[!current_adc_buf][i];
+			int32_t rectified;
+
+			rectified = abs(val - silence_value);
+
+			accum_silence += val;
+			accum_envelope += rectified;
+		}
+		accum_silence /= number_of_samples;
+		accum_envelope /= number_of_samples;
+		silence_value = (SILENCE_EMA_WEIGHT * silence_value + accum_silence) / (SILENCE_EMA_WEIGHT + 1);
+		envelope_value = (ENVELOPE_EMA_WEIGHT * envelope_value + accum_envelope) / (ENVELOPE_EMA_WEIGHT + 1);
+
 		udp.beginPacket(IP_target, udp_target_port);
 		udp.write((const uint8_t *)(&adc_buf[!current_adc_buf][0]), sizeof(adc_buf[0]));
 		udp.endPacket();
 		send_samples_now = 0;
-	}	  
+		Serial.print("Silence val "); Serial.print(silence_value); Serial.print(" envelope val "); Serial.print(envelope_value);	
+		Serial.println("");
+	}	 
 }
 

@@ -48,11 +48,37 @@ void spiBegin(void)
   digitalWrite(scePin, HIGH);
 }
 
-void sample_isr(void)
+#define ICACHE_RAM_ATTR     __attribute__((section(".iram.text")))
+static inline ICACHE_RAM_ATTR uint8_t transfer(uint8_t data) 
+{
+	while(SPI1CMD & SPIBUSY) {}
+
+	SPI1W0 = data;
+	SPI1CMD |= SPIBUSY;
+	while(SPI1CMD & SPIBUSY) {}
+	return (uint8_t) (SPI1W0 & 0xff);
+}
+
+static inline ICACHE_RAM_ATTR uint16_t transfer16(void) {
+	union {
+		uint16_t val;
+		struct {
+			uint8_t lsb;
+			uint8_t msb;
+		};
+	} out;
+
+	out.lsb = transfer(0);
+	out.msb = transfer(0);
+	return out.val;
+}
+
+
+void ICACHE_RAM_ATTR sample_isr(void)
 {
 	// Read a sample from ADC
 	digitalWrite(scePin, LOW);
-	adc_buf[current_adc_buf][adc_buf_pos] = SPI.transfer16(0x00);
+	adc_buf[current_adc_buf][adc_buf_pos] = transfer16();
 	digitalWrite(scePin, HIGH);
 
 	adc_buf_pos++;

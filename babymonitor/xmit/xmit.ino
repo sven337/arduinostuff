@@ -66,7 +66,7 @@ void sample_isr(void)
 void setup(void)
 { 
 	Serial.begin(115200);
-	Serial.println("hi");
+	Serial.println("I was built on " __DATE__ " at " __TIME__ "");
 
 	WiFi.begin ( ssid, password );
 	IPAddress myip(192, 168, 0, 32);

@@ -24,8 +24,8 @@ static unsigned long last_ping_at = 0;
 int init_failed = 0;
 
 //const uint8_t thermometer_identification_letter = 'L'; // "living room"
-//const uint8_t thermometer_identification_letter = 'E'; // "exterior"
-const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
+const uint8_t thermometer_identification_letter = 'E'; // "exterior"
+//const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
 
 ISR(WDT_vect)
 {
@@ -43,6 +43,8 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 		Serial.println("send ok");
 	else
 		Serial.println("send KO");
+	
+	radio.powerDown();
 
 	if (!ok) {
 		return -1;
@@ -76,8 +78,7 @@ void setup(){
 
 	radio.printDetails();
 
-	if ((radio.getPALevel() != RF24_PA_MAX) ||
-		(radio.getDataRate() != RF24_250KBPS) ||
+	if ((radio.getDataRate() != RF24_250KBPS) ||
 		(radio.getCRCLength() != RF24_CRC_16) || 
 		(radio.getChannel() != 95)) {
 		// failed to initialize radio
@@ -89,15 +90,15 @@ void setup(){
 	pinMode(LED_RED, OUTPUT);
 	digitalWrite(LED_YELLOW, 1);
 	digitalWrite(LED_RED, 1);
-	delay(200);
+	delay(100);
 	digitalWrite(LED_RED, 0);
-	delay(200);
+	delay(100);
 	digitalWrite(LED_RED, 1);
-	delay(200);
+	delay(100);
 	digitalWrite(LED_RED, 0);
-	delay(200);
+	delay(100);
 	digitalWrite(LED_RED, 1);
-	delay(200);
+	delay(100);
 	digitalWrite(LED_RED, 0);
 	digitalWrite(LED_YELLOW, 0);
 }
@@ -116,13 +117,13 @@ void loop()
 			red = !red;
 			// Christmas tree if init failed
 			digitalWrite(LED_YELLOW, 1);
-			delay(100);
+			delay(50);
 			digitalWrite(LED_YELLOW, 0);
-			delay(100);
+			delay(50);
 			digitalWrite(LED_YELLOW, 1);
-			delay(100);
+			delay(50);
 			digitalWrite(LED_YELLOW, 0);
-			delay(100);
+			delay(50);
 	}
 
 	uint16_t battery_level = analogRead(BATTERY_PIN);
@@ -181,11 +182,15 @@ void loop()
 		if (!radio_send('T', thermometer_identification_letter, (raw >> 8) & 0xFF, raw & 0xFF)) {
 			break;
 		}
+
+		Serial.println("radio message not sent, not sleeping");
 		delay(2000);
 	}
 	
+	Serial.println("going to sleep now");
 	Serial.flush();
 	Sleepy::loseSomeTime(32768L);
+	Serial.println("waking up");
 	digitalWrite(LED_RED, 0);
 
 	for (int i = 1; i < 15L*60L*1000L / 32768L; i++) {

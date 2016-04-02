@@ -32,10 +32,10 @@ static const uint8_t SCK   = 14;
 -       8-VDD       ----------------  3.3V  
 */
 
-uint16_t adc_buf[2][600];
-int current_adc_buf;
-unsigned int adc_buf_pos;
-int send_samples_now;
+uint16_t adc_buf[2][700]; // ADC data buffer, double buffered
+int current_adc_buf; // which data buffer is being used for the ADC (the other is being sent)
+unsigned int adc_buf_pos; // position in the ADC data buffer
+int send_samples_now; // flag to signal that a buffer is ready to be sent
 
 void spiBegin(void) 
 {
@@ -76,12 +76,16 @@ static inline ICACHE_RAM_ATTR uint16_t transfer16(void) {
 
 void ICACHE_RAM_ATTR sample_isr(void)
 {
+	uint16_t val;
+
 	// Read a sample from ADC
 	digitalWrite(scePin, LOW);
-	adc_buf[current_adc_buf][adc_buf_pos] = transfer16();
+	val = transfer16();
 	digitalWrite(scePin, HIGH);
-
+	adc_buf[current_adc_buf][adc_buf_pos] = val & 0xFFF;
 	adc_buf_pos++;
+
+	// If the buffer is full, signal it's ready to be sent and switch to the other one
 	if (adc_buf_pos > sizeof(adc_buf[0])/sizeof(adc_buf[0][0])) {
 		adc_buf_pos = 0;
 		current_adc_buf = !current_adc_buf;

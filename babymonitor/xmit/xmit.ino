@@ -37,21 +37,6 @@ int current_adc_buf;
 int adc_buf_pos;
 int send_samples_now;
 
-void mcp_output(uint16_t out)
-{
-  uint16_t temp=0;
-  temp = out & 0xFF00;   
-  temp = temp >> 8;      //LSB
-  out = out << 8;        //MSB
-  out = out + temp;
-  out = out >> 1;
-  out = out & 0x0FFF;
-  Serial.print(out);
-  Serial.print(" ");
-  Serial.println(millis());
-}
-
-
 void spiBegin(void) 
 {
   pinMode(scePin, OUTPUT);

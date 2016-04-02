@@ -161,7 +161,7 @@ int main(int argc, char **argv) {
     printf("server received %d/%d bytes: ", strlen(buf), n);
 	int i;
 	for (i = 0; i < n; i+=2) {
-		uint16_t value = ((buf[i] & 0x0F) <<8 | (buf[i+1] &0xFF)) & 0x0FFF;
+		uint16_t value = ((buf[i+1] & 0x0F) <<8 | (buf[i] &0xFF)) & 0x0FFF;
 		printf("%u ", value);
 		int16_t v = (value - 0x1000/2) << 4;
 		printf("(%d) ", v);

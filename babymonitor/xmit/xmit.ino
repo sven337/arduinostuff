@@ -68,8 +68,8 @@ static inline ICACHE_RAM_ATTR uint16_t transfer16(void) {
 		};
 	} out;
 
-	out.lsb = transfer(0);
 	out.msb = transfer(0);
+	out.lsb = transfer(0);
 	return out.val;
 }
 

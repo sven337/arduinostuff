@@ -171,7 +171,8 @@ void loop()
 		accum_silence /= number_of_samples;
 		accum_envelope /= number_of_samples;
 		silence_value = (SILENCE_EMA_WEIGHT * silence_value + accum_silence) / (SILENCE_EMA_WEIGHT + 1);
-		envelope_value = (ENVELOPE_EMA_WEIGHT * envelope_value + accum_envelope) / (ENVELOPE_EMA_WEIGHT + 1);
+//		envelope_value = (ENVELOPE_EMA_WEIGHT * envelope_value + accum_envelope) / (ENVELOPE_EMA_WEIGHT + 1);
+		envelope_value = accum_envelope;
 
 		udp.beginPacket(IP_target, udp_target_port);
 		udp.write((const uint8_t *)(&adc_buf[!current_adc_buf][0]), sizeof(adc_buf[0]));

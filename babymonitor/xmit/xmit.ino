@@ -40,8 +40,9 @@ int send_samples_now; // flag to signal that a buffer is ready to be sent
 #define SILENCE_EMA_WEIGHT 1024
 #define ENVELOPE_EMA_WEIGHT 2
 int32_t silence_value = 2048; // computed as an exponential moving average of the signal
-int32_t envelope_value = 100; // computed as an EMA of the abs(signal-silence_value)
-uint16_t envelope_threshold = 100; // envelope threshold to trigger data sending
+uint16_t envelope_threshold = 130; // envelope threshold to trigger data sending
+
+int32_t send_sound_util = 0; // date until sound transmission ends after an envelope threshold has triggered sound transmission
 
 static inline void setDataBits(uint16_t bits) {
     const uint32_t mask = ~((SPIMMOSI << SPILMOSI) | (SPIMMISO << SPILMISO));
@@ -158,7 +159,7 @@ void loop()
 		// Update silence and envelope computations
 		uint16_t number_of_samples = sizeof(adc_buf[0])/sizeof(adc_buf[0][0]);
 		int32_t accum_silence = 0;
-		int32_t accum_envelope = 0;
+		int32_t envelope_value = 0;
 		for (unsigned int i = 0; i < number_of_samples; i++) {
 			int32_t val = adc_buf[!current_adc_buf][i];
 			int32_t rectified;
@@ -166,17 +167,22 @@ void loop()
 			rectified = abs(val - silence_value);
 
 			accum_silence += val;
-			accum_envelope += rectified;
+			envelope_value += rectified;
 		}
 		accum_silence /= number_of_samples;
-		accum_envelope /= number_of_samples;
+		envelope_value /= number_of_samples;
 		silence_value = (SILENCE_EMA_WEIGHT * silence_value + accum_silence) / (SILENCE_EMA_WEIGHT + 1);
-//		envelope_value = (ENVELOPE_EMA_WEIGHT * envelope_value + accum_envelope) / (ENVELOPE_EMA_WEIGHT + 1);
-		envelope_value = accum_envelope;
+		envelope_value = envelope_value;
 
-		udp.beginPacket(IP_target, udp_target_port);
-		udp.write((const uint8_t *)(&adc_buf[!current_adc_buf][0]), sizeof(adc_buf[0]));
-		udp.endPacket();
+		if (envelope_value > envelope_threshold) {
+			send_sound_util = millis() + 15000; 
+		} 
+
+		if (millis() < send_sound_util) {
+			udp.beginPacket(IP_target, udp_target_port);
+			udp.write((const uint8_t *)(&adc_buf[!current_adc_buf][0]), sizeof(adc_buf[0]));
+			udp.endPacket();
+		}
 		send_samples_now = 0;
 		Serial.print("Silence val "); Serial.print(silence_value); Serial.print(" envelope val "); Serial.print(envelope_value);	
 		Serial.println("");

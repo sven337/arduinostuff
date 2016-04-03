@@ -13,12 +13,11 @@ WiFiUDP udp;
 const int udp_target_port = 45990;
 const IPAddress IP_target(192,168,0,2);
 
-// Pin definitions: 
-const int scePin = 15;   	// SCE - Chip select
 /* HW definition of alternate function:
 static const uint8_t MOSI  = 13;
 static const uint8_t MISO  = 12;
 static const uint8_t SCK   = 14;
+static const uint8_t SS    = 15;
 */
 /*  Hardware: 
       MCP3201 Pin   ---------------- ESP8266 Pin
@@ -45,13 +44,11 @@ uint16_t envelope_threshold = 100; // envelope threshold to trigger data sending
 
 void spiBegin(void) 
 {
-  pinMode(scePin, OUTPUT);
-
   SPI.begin();
   SPI.setDataMode(SPI_MODE0);
   SPI.setBitOrder(MSBFIRST);
   SPI.setClockDivider(SPI_CLOCK_DIV8); 
-  digitalWrite(scePin, HIGH);
+  SPI.setHwCs(1);
 }
 
 #define ICACHE_RAM_ATTR     __attribute__((section(".iram.text")))
@@ -85,9 +82,7 @@ void ICACHE_RAM_ATTR sample_isr(void)
 	uint16_t val;
 
 	// Read a sample from ADC
-	digitalWrite(scePin, LOW);
 	val = transfer16();
-	digitalWrite(scePin, HIGH);
 	adc_buf[current_adc_buf][adc_buf_pos] = val & 0xFFF;
 	adc_buf_pos++;
 

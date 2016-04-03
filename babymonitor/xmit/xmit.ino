@@ -13,11 +13,12 @@ WiFiUDP udp;
 const int udp_target_port = 45990;
 const IPAddress IP_target(192,168,0,2);
 
+// Pin definitions: 
+const int scePin = 15;   	// SCE - Chip select
 /* HW definition of alternate function:
 static const uint8_t MOSI  = 13;
 static const uint8_t MISO  = 12;
 static const uint8_t SCK   = 14;
-static const uint8_t SS    = 15;
 */
 /*  Hardware: 
       MCP3201 Pin   ---------------- ESP8266 Pin
@@ -42,6 +43,12 @@ int32_t silence_value = 2048; // computed as an exponential moving average of th
 int32_t envelope_value = 100; // computed as an EMA of the abs(signal-silence_value)
 uint16_t envelope_threshold = 100; // envelope threshold to trigger data sending
 
+static inline void setDataBits(uint16_t bits) {
+    const uint32_t mask = ~((SPIMMOSI << SPILMOSI) | (SPIMMISO << SPILMISO));
+    bits--;
+    SPI1U1 = ((SPI1U1 & mask) | ((bits << SPILMOSI) | (bits << SPILMISO)));
+}
+
 void spiBegin(void) 
 {
   SPI.begin();
@@ -49,19 +56,11 @@ void spiBegin(void)
   SPI.setBitOrder(MSBFIRST);
   SPI.setClockDivider(SPI_CLOCK_DIV8); 
   SPI.setHwCs(1);
+  setDataBits(16);
 }
 
 #define ICACHE_RAM_ATTR     __attribute__((section(".iram.text")))
-static inline ICACHE_RAM_ATTR uint8_t transfer(uint8_t data) 
-{
-	while(SPI1CMD & SPIBUSY) {}
-
-	SPI1W0 = data;
-	SPI1CMD |= SPIBUSY;
-	while(SPI1CMD & SPIBUSY) {}
-	return (uint8_t) (SPI1W0 & 0xff);
-}
-
+/* SPI code based on the SPI library */
 static inline ICACHE_RAM_ATTR uint16_t transfer16(void) {
 	union {
 		uint16_t val;
@@ -71,11 +70,30 @@ static inline ICACHE_RAM_ATTR uint16_t transfer16(void) {
 		};
 	} out;
 
-	out.msb = transfer(0);
-	out.lsb = transfer(0);
+
+	// Transfer 16 bits at once, leaving HW CS low for the whole 16 bits 
+	while(SPI1CMD & SPIBUSY) {}
+	SPI1W0 = 0;
+	SPI1CMD |= SPIBUSY;
+	while(SPI1CMD & SPIBUSY) {}
+
+	/* Follow MCP3201's datasheet: return value looks like this:
+	xxCBA987 65432101
+	We want 
+	76543210 000CBA98
+
+	So swap the bytes, select 12 bits starting at bit 1, and shift right by one.
+	*/
+
+	out.val = SPI1W0 & 0xFFFF;
+	uint8_t tmp = out.msb;
+	out.msb = out.lsb;
+	out.lsb = tmp;
+
+	out.val &= (0x0FFF << 1);
+	out.val >>= 1;
 	return out.val;
 }
-
 
 void ICACHE_RAM_ATTR sample_isr(void)
 {

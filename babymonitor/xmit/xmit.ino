@@ -112,7 +112,28 @@ void ICACHE_RAM_ATTR sample_isr(void)
 		send_samples_now = 1;
 	}
 }
- 
+
+void ota_onstart(void)
+{
+	// Disable timer when an OTA happens
+	timer1_detachInterrupt();
+	timer1_disable();
+
+	// Disable SPI XXX explain why -- no effect on issue
+	SPI.end();
+}
+
+void ota_onprogress(unsigned int sz, unsigned int total)
+{
+	Serial.print("OTA: "); Serial.print(sz); Serial.print("/"); Serial.print(total);
+	Serial.print("="); Serial.print(100*sz/total); Serial.println("");
+}
+
+void ota_onerror(ota_error_t err)
+{
+	Serial.print("OTA ERROR:"); Serial.println((int)err);
+}
+
 void setup(void)
 { 
 	Serial.begin(115200);
@@ -123,8 +144,7 @@ void setup(void)
 	IPAddress gw(192, 168, 0, 1);
 	IPAddress subnet(255, 255, 255, 0);
 	WiFi.config(myip, gw, subnet);
-	Serial.print("Connecting to ");
-	Serial.print(ssid); Serial.print(" "); Serial.print(password);
+	Serial.print("Connecting to wifi");
 	// Wait for connection
 	while ( WiFi.status() != WL_CONNECTED ) {
 		delay ( 500 );
@@ -137,6 +157,9 @@ void setup(void)
 	Serial.print ( "IP " );
 	Serial.println ( WiFi.localIP() );
 
+	ArduinoOTA.onStart(ota_onstart);
+	ArduinoOTA.onError(ota_onerror);
+	ArduinoOTA.onProgress(ota_onprogress);
 	ArduinoOTA.begin();
 
 	spiBegin(); 

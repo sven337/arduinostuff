@@ -40,9 +40,11 @@ int send_samples_now; // flag to signal that a buffer is ready to be sent
 #define SILENCE_EMA_WEIGHT 1024
 #define ENVELOPE_EMA_WEIGHT 2
 int32_t silence_value = 2048; // computed as an exponential moving average of the signal
-uint16_t envelope_threshold = 130; // envelope threshold to trigger data sending
+uint16_t envelope_threshold = 150; // envelope threshold to trigger data sending
 
-int32_t send_sound_util = 0; // date until sound transmission ends after an envelope threshold has triggered sound transmission
+uint32_t send_sound_util = 0; // date until sound transmission ends after an envelope threshold has triggered sound transmission
+
+int enable_highpass_filter = 1;
 
 static inline void setDataBits(uint16_t bits) {
     const uint32_t mask = ~((SPIMMOSI << SPILMOSI) | (SPIMMISO << SPILMISO));
@@ -134,6 +136,7 @@ void ota_onerror(ota_error_t err)
 	Serial.print("OTA ERROR:"); Serial.println((int)err);
 }
 
+
 void setup(void)
 { 
 	Serial.begin(115200);
@@ -168,10 +171,36 @@ void setup(void)
 	timer1_attachInterrupt(sample_isr);
 	timer1_enable(TIM_DIV16, TIM_EDGE, TIM_LOOP);
 	timer1_write(clockCyclesPerMicrosecond() / 16 * 80); //80us = 12.5kHz sampling freq
+
 	Serial.println("setup done");
 }
 
- 
+#pragma GCC push_options
+#pragma GCC optimize("O3")
+
+/* Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
+   Command line: ./mkfilter -Bu -Hp -o 5 -a 0.012 -l */
+// Highpass, Fc=150Hz, 5th order butterworth filter
+
+#define NZEROS 5
+#define NPOLES 5
+#define GAIN   1.129790960e+00f
+
+static float xv[NZEROS+1], yv[NPOLES+1];
+
+static float filterloop(float input)
+  { for (;;)
+      { xv[0] = xv[1]; xv[1] = xv[2]; xv[2] = xv[3]; xv[3] = xv[4]; xv[4] = xv[5]; 
+        xv[5] = input / GAIN;
+        yv[0] = yv[1]; yv[1] = yv[2]; yv[2] = yv[3]; yv[3] = yv[4]; yv[4] = yv[5]; 
+        yv[5] =   (xv[5] - xv[0]) + 5 * (xv[1] - xv[4]) + 10 * (xv[3] - xv[2])
+                     + (  0.7834365141f * yv[0]) + ( -4.1083230157f * yv[1])
+                     + (  8.6224512099f * yv[2]) + ( -9.0535899276f * yv[3])
+                     + (  4.7560230574f * yv[4]);
+        return yv[5];
+      }
+  }
+
 void loop() 
 {
 	ArduinoOTA.handle();
@@ -183,9 +212,16 @@ void loop()
 		uint16_t number_of_samples = sizeof(adc_buf[0])/sizeof(adc_buf[0][0]);
 		int32_t accum_silence = 0;
 		int32_t envelope_value = 0;
+
+		int32_t now = millis();
 		for (unsigned int i = 0; i < number_of_samples; i++) {
 			int32_t val = adc_buf[!current_adc_buf][i];
 			int32_t rectified;
+
+			if (enable_highpass_filter) {
+				adc_buf[!current_adc_buf][i] = filterloop(val) + 2048;
+			}
+			val = adc_buf[!current_adc_buf][i];
 
 			rectified = abs(val - silence_value);
 
@@ -208,7 +244,9 @@ void loop()
 		}
 		send_samples_now = 0;
 		Serial.print("Silence val "); Serial.print(silence_value); Serial.print(" envelope val "); Serial.print(envelope_value);	
+		Serial.print("delay "); Serial.print(millis() - now);
 		Serial.println("");
 	}	 
 }
+#pragma GCC pop_options
 

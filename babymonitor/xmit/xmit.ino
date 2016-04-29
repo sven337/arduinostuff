@@ -120,15 +120,12 @@ void ota_onstart(void)
 	// Disable timer when an OTA happens
 	timer1_detachInterrupt();
 	timer1_disable();
-
-	// Disable SPI XXX explain why -- no effect on issue
-	SPI.end();
 }
 
 void ota_onprogress(unsigned int sz, unsigned int total)
 {
 	Serial.print("OTA: "); Serial.print(sz); Serial.print("/"); Serial.print(total);
-	Serial.print("="); Serial.print(100*sz/total); Serial.println("");
+	Serial.print("="); Serial.print(100*sz/total); Serial.println("%%");
 }
 
 void ota_onerror(ota_error_t err)

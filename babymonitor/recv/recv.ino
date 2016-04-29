@@ -174,7 +174,7 @@ void ota_onstart(void)
 void ota_onprogress(unsigned int sz, unsigned int total)
 {
 	Serial.print("OTA: "); Serial.print(sz); Serial.print("/"); Serial.print(total);
-	Serial.print("="); Serial.print(100*sz/total); Serial.println("%%");
+	Serial.print("="); Serial.print(100*sz/total); Serial.println("%");
 }
 
 void ota_onerror(ota_error_t err)
@@ -217,7 +217,7 @@ void setup ( void )
 	timer1_isr_init();
 	timer1_attachInterrupt(playsample_isr);
 	timer1_enable(TIM_DIV16, TIM_EDGE, TIM_LOOP);
-//	timer1_write(clockCyclesPerMicrosecond() / 16 * 80); //80us = 12.5kHz sampling freq
+	timer1_write(clockCyclesPerMicrosecond() / 16 * 80); //80us = 12.5kHz sampling freq
 
 	udp.begin(udp_recv_port);
 	Serial.println("setup done");
@@ -245,7 +245,7 @@ void loop ( void )
 		Serial.println("");
 	}
 
-	long now = micros();
+/*	long now = micros();
 	for (int i = 0; i < 100; i++) {
 		DAC(150);
 		DAC(300);
@@ -260,6 +260,6 @@ void loop ( void )
 	}
 
 	now = micros() - now;
-	Serial.println(now);
+	Serial.println(now);*/
 
 }

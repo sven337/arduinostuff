@@ -51,9 +51,7 @@ static inline ICACHE_RAM_ATTR bool twi_write_start(void) {
   SCL_HIGH();
   SDA_HIGH();
   if (SDA_READ() == 0) return false;
-  twi_delay(twi_dcount);
   SDA_LOW();
-  twi_delay(twi_dcount);
   return true;
 }
 
@@ -61,12 +59,9 @@ static inline ICACHE_RAM_ATTR bool twi_write_stop(void){
   uint32_t i = 0;
   SCL_LOW();
   SDA_LOW();
-  twi_delay(twi_dcount);
   SCL_HIGH();
   while (SCL_READ() == 0 && (i++) < twi_clockStretchLimit); // Clock stretching
-  twi_delay(twi_dcount);
   SDA_HIGH();
-  twi_delay(twi_dcount);
 
   return true;
 }
@@ -79,7 +74,6 @@ static inline ICACHE_RAM_ATTR bool twi_write_bit(bool bit) {
   twi_delay(twi_dcount+1);
   SCL_HIGH();
   while (SCL_READ() == 0 && (i++) < twi_clockStretchLimit);// Clock stretching
-  twi_delay(twi_dcount);
   return true;
 }
 
@@ -91,7 +85,6 @@ static inline ICACHE_RAM_ATTR bool twi_read_bit(void) {
   SCL_HIGH();
   while (SCL_READ() == 0 && (i++) < twi_clockStretchLimit);// Clock stretching
   bool bit = SDA_READ();
-  twi_delay(twi_dcount);
   return bit;
 }
 
@@ -130,9 +123,7 @@ unsigned char inline ICACHE_RAM_ATTR mytwi_writeTo(unsigned char address, unsign
   i = 0;
   while(SDA_READ() == 0 && (i++) < 10){
     SCL_LOW();
-    twi_delay(twi_dcount);
     SCL_HIGH();
-    twi_delay(twi_dcount);
   }
   return 0;
 }

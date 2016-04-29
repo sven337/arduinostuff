@@ -47,7 +47,6 @@ static void twi_delay(unsigned char v){
 #pragma GCC diagnostic pop
 } 
 
-#pragma GCC optimize("O3")
 static inline ICACHE_RAM_ATTR bool twi_write_start(void) {
   SCL_HIGH();
   SDA_HIGH();

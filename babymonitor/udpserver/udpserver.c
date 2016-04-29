@@ -164,7 +164,7 @@ int main(int argc, char **argv) {
 		uint16_t value = ((buf[i+1] & 0x0F) <<8 | (buf[i] &0xFF)) & 0x0FFF;
 		printf("%u ", value);
 		int16_t v = (value - 0x1000/2) << 4;
-		printf("(%d) ", v);
+		printf("(%d)\n", v);
 		append_sample(out, v);
 	}
 	printf("\n");

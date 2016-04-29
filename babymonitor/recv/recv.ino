@@ -16,7 +16,8 @@ const int udp_recv_port = 45990;
 WiFiUDP udp;
 TwoWire i2c;
 
-uint16_t data_buf[3][700]; // data buffer, triple buffered
+#define NB_DATA_BUFS 5
+uint16_t data_buf[NB_DATA_BUFS][700]; // data buffer, N buffered
 
 unsigned int current_play_data_buf; // current data buf being played
 unsigned int play_data_buf_pos; // position in the ADC data buffer
@@ -161,7 +162,7 @@ void ICACHE_RAM_ATTR playsample_isr(void)
 	if (play_data_buf_pos >= sizeof(data_buf[0])/sizeof(data_buf[0][0])) {
 		play_data_buf_pos = 0;
 		current_play_data_buf++;
-		if (current_play_data_buf == 3) {
+		if (current_play_data_buf == NB_DATA_BUFS) {
 			current_play_data_buf = 0;
 		}
 
@@ -238,7 +239,7 @@ void loop ( void )
 	if (sz) {
 		udp.read((unsigned char *)&data_buf[current_recv_data_buf][0], sz);
 		current_recv_data_buf++;
-		if (current_recv_data_buf == 3) {
+		if (current_recv_data_buf == NB_DATA_BUFS) {
 			current_recv_data_buf = 0;
 			if (current_recv_data_buf == current_play_data_buf && !play_waiting) {
 				Serial.println("buffer overflow when receiving");

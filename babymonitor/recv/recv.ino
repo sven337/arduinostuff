@@ -24,6 +24,7 @@ unsigned int play_data_buf_pos; // position in the ADC data buffer
 unsigned int current_recv_data_buf; // current data buf being received
 
 bool play_waiting = true;
+long play_waiting_at;
 
 #define ICACHE_RAM_ATTR     __attribute__((section(".iram.text")))
 #define twi_sda mySDA
@@ -168,6 +169,7 @@ void ICACHE_RAM_ATTR playsample_isr(void)
 
 		if (current_play_data_buf == current_recv_data_buf) {
 			play_waiting = true;
+			play_waiting_at = micros();
 		}
 	}
 }
@@ -246,7 +248,7 @@ void loop ( void )
 			}
 		}
 		if (play_waiting) {
-			Serial.println("Restarting play");
+			Serial.print("Restarting play, was waiting (us)"); Serial.println(micros() - play_waiting_at);
 			play_waiting = false;
 		}
 

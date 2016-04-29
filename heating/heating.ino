@@ -3,6 +3,7 @@
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
 #define UPDATER_NO_MDNS
+#include "ESP8266mDNS.h"
 #include <ArduinoOTA.h>
 
 #include "wifi_params.h"
@@ -47,7 +48,7 @@ void setup ( void ) {
 	pinMode ( chaudiere, OUTPUT );
 	pinMode(pushbtn, INPUT_PULLUP);
 	digitalWrite(chaudiere, 1);
-	Serial.begin ( 78400 );
+	Serial.begin ( 57600 );
 	WiFi.begin ( ssid, password );
 	IPAddress myip(192, 168, 0, 33);
 	IPAddress gw(192, 168, 0, 254);
@@ -136,7 +137,7 @@ void loop ( void ) {
 	bool force_heating = false;
 
 	if (!digitalRead(pushbtn)) {
-		delay(500);
+		delay(100);
 		if (!digitalRead(pushbtn)) {
 			force_heating = true;
 		}
@@ -176,4 +177,3 @@ void loop ( void ) {
 		parse_cmd(&packetBuffer[0]);
 	}
 }
-

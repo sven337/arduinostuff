@@ -11,6 +11,9 @@
 const int mySDA = 13;
 const int mySCL = 12;
 
+const int AMPLI_MUTE_PIN = 16;
+const int AMPLI_SHUTDOWN_PIN = 14;
+
 const int udp_recv_port = 45990;
 
 WiFiUDP udp;
@@ -24,6 +27,7 @@ unsigned int play_data_buf_pos; // position in the ADC data buffer
 unsigned int current_recv_data_buf; // current data buf being received
 
 bool play_waiting = true;
+bool amplifier_stopped = false;
 long play_waiting_at;
 
 #define ICACHE_RAM_ATTR     __attribute__((section(".iram.text")))
@@ -212,6 +216,7 @@ void setup ( void )
 	ArduinoOTA.onStart(ota_onstart);
 	ArduinoOTA.onError(ota_onerror);
 	ArduinoOTA.onProgress(ota_onprogress);
+	ArduinoOTA.setHostname("bb-recv");
 	ArduinoOTA.begin();
 
 	timer1_isr_init();
@@ -220,7 +225,9 @@ void setup ( void )
 	timer1_write(clockCyclesPerMicrosecond() / 16 * 80); //80us = 12.5kHz sampling freq
 
 	udp.begin(udp_recv_port);
-	Serial.println("setup done");
+
+	pinMode(AMPLI_MUTE_PIN, OUTPUT);
+	pinMode(AMPLI_SHUTDOWN_PIN, OUTPUT);
 
 }
 
@@ -239,27 +246,23 @@ void loop ( void )
 		}
 		if (play_waiting) {
 			Serial.print("Restarting play, was waiting (us)"); Serial.println(micros() - play_waiting_at);
+			// Re-enable *then* unmute in that order to avoid pops
+			digitalWrite(AMPLI_SHUTDOWN_PIN, 1);
+			digitalWrite(AMPLI_MUTE_PIN, 1);
 			play_waiting = false;
+			amplifier_stopped = false;
 		}
 
 		Serial.println("");
 	}
 
-/*	long now = micros();
-	for (int i = 0; i < 100; i++) {
-		DAC(150);
-		DAC(300);
-		DAC(450);
-		DAC(600);
-		DAC(750);
-		DAC(1000);
-		DAC(1500);
-		DAC(2000);
-		DAC(2500);
-		DAC(3000);
+	if (!amplifier_stopped && play_waiting) {
+		if ((micros() - play_waiting_at) > 2000 * 1000) {
+			// If nothing has been played for two seconds, shut down the amplifier 
+			Serial.println("Shutting down amplifier!");
+			digitalWrite(AMPLI_SHUTDOWN_PIN, 0);
+			digitalWrite(AMPLI_MUTE_PIN, 0);
+			amplifier_stopped = true;
+		}
 	}
-
-	now = micros() - now;
-	Serial.println(now);*/
-
 }

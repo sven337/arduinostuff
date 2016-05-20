@@ -10,8 +10,12 @@
 #include <ArduinoOTA.h>
 
 WiFiUDP udp;
-const int udp_target_port = 45990;
-const IPAddress IP_target(192,168,0,2);
+const int udp_recv_port = 45990; // for command&control
+const int udp_target_port = 45990; // sound transfer
+const IPAddress myip(192, 168, 0, 32);
+const IPAddress IP_target_device(192, 168, 0, 31);
+const IPAddress IP_target_PC(192, 168, 0, 2);
+IPAddress IP_target = IP_target_device;
 
 // Pin definitions: 
 const int scePin = 15;   	// SCE - Chip select
@@ -40,11 +44,11 @@ int send_samples_now; // flag to signal that a buffer is ready to be sent
 #define SILENCE_EMA_WEIGHT 1024
 #define ENVELOPE_EMA_WEIGHT 2
 int32_t silence_value = 2048; // computed as an exponential moving average of the signal
-uint16_t envelope_threshold = 150; // envelope threshold to trigger data sending
+uint16_t envelope_threshold = 120; // envelope threshold to trigger data sending
 
 uint32_t send_sound_util = 0; // date until sound transmission ends after an envelope threshold has triggered sound transmission
 
-int enable_highpass_filter = 1;
+int enable_highpass_filter = 0;
 
 static inline void setDataBits(uint16_t bits) {
     const uint32_t mask = ~((SPIMMOSI << SPILMOSI) | (SPIMMISO << SPILMISO));
@@ -139,8 +143,10 @@ void setup(void)
 	Serial.begin(115200);
 	Serial.println("I was built on " __DATE__ " at " __TIME__ "");
 
+	WiFi.setOutputPower(10); // reduce power to 10dBm = 10mW
+	WiFi.mode(WIFI_STA);
+
 	WiFi.begin ( ssid, password );
-	IPAddress myip(192, 168, 0, 32);
 	IPAddress gw(192, 168, 0, 1);
 	IPAddress subnet(255, 255, 255, 0);
 	WiFi.config(myip, gw, subnet);
@@ -160,6 +166,7 @@ void setup(void)
 	ArduinoOTA.onStart(ota_onstart);
 	ArduinoOTA.onError(ota_onerror);
 	ArduinoOTA.onProgress(ota_onprogress);
+	ArduinoOTA.setHostname("bb-xmit");
 	ArduinoOTA.begin();
 
 	spiBegin(); 
@@ -170,6 +177,8 @@ void setup(void)
 	timer1_write(clockCyclesPerMicrosecond() / 16 * 80); //80us = 12.5kHz sampling freq
 
 	Serial.println("setup done");
+
+	udp.begin(udp_recv_port);
 }
 
 #pragma GCC push_options
@@ -243,7 +252,39 @@ void loop()
 		Serial.print("Silence val "); Serial.print(silence_value); Serial.print(" envelope val "); Serial.print(envelope_value);	
 		Serial.print("delay "); Serial.print(millis() - now);
 		Serial.println("");
-	}	 
+	}	
+
+	if (udp.parsePacket()) {
+		// Command and control packets
+		char buf[32];
+		char *ptr = &buf[0];
+		udp.read(&buf[0], 31);
+		buf[31] = 0;
+#define MATCHSTR(X,Y) !strncmp(X, Y, strlen(Y))
+		if (MATCHSTR(buf, "target PC")) {
+			// Direct sound to PC
+			IP_target = IP_target_PC;
+			Serial.println("target PC");
+		} else if (MATCHSTR(buf, "target dev")) {
+			// Direct sound to device
+			IP_target = IP_target_device;
+			Serial.println("target dev");
+		} else if (MATCHSTR(buf, "threshold ")) {
+			// Modify envelope threshold
+			ptr += strlen("threshold ");
+			envelope_threshold = atoi(ptr);
+			Serial.print("threshold "); Serial.println(envelope_threshold);
+		} else if (MATCHSTR(buf, "sendnow")) {
+			send_sound_util = millis() + 15000;
+		} else if (MATCHSTR(buf, "filter")) {
+			enable_highpass_filter = !enable_highpass_filter;
+			if (enable_highpass_filter) {
+				Serial.print("enabled");
+			} else {
+				Serial.print("disabled");
+			}
+			Serial.println(" highpass filter");
+		}
+	}
 }
-#pragma GCC pop_options
 

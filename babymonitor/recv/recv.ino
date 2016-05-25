@@ -8,11 +8,11 @@
 #include "wifi_params.h"
 
 
-const int mySDA = 13;
-const int mySCL = 12;
+const int mySDA = D7;
+const int mySCL = D6;
 
-const int AMPLI_MUTE_PIN = 16;
-const int AMPLI_SHUTDOWN_PIN = 14;
+const int AMPLI_MUTE_PIN = D2;
+const int AMPLI_SHUTDOWN_PIN = D1;
 
 const int udp_recv_port = 45990;
 

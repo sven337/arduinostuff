@@ -18,11 +18,11 @@ const IPAddress IP_target_PC(192, 168, 0, 2);
 IPAddress IP_target = IP_target_device;
 
 // Pin definitions: 
-const int scePin = 15;   	// SCE - Chip select
+const int scePin = D8; //15;   	// SCE - Chip select
 /* HW definition of alternate function:
-static const uint8_t MOSI  = 13;
-static const uint8_t MISO  = 12;
-static const uint8_t SCK   = 14;
+static const uint8_t MOSI  = 13; D7 on nodemcu
+static const uint8_t MISO  = 12; D6 on nodemcu
+static const uint8_t SCK   = 14; D5 on nodemcu
 */
 /*  Hardware: 
       MCP3201 Pin   ---------------- ESP8266 Pin
@@ -44,7 +44,7 @@ int send_samples_now; // flag to signal that a buffer is ready to be sent
 #define SILENCE_EMA_WEIGHT 1024
 #define ENVELOPE_EMA_WEIGHT 2
 int32_t silence_value = 2048; // computed as an exponential moving average of the signal
-uint16_t envelope_threshold = 120; // envelope threshold to trigger data sending
+uint16_t envelope_threshold = 150; // envelope threshold to trigger data sending
 
 uint32_t send_sound_util = 0; // date until sound transmission ends after an envelope threshold has triggered sound transmission
 

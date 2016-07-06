@@ -261,30 +261,36 @@ void loop()
 		udp.read(&buf[0], 31);
 		buf[31] = 0;
 #define MATCHSTR(X,Y) !strncmp(X, Y, strlen(Y))
+        udp.beginPacket(udp.remoteIP(), udp.remotePort());
 		if (MATCHSTR(buf, "target PC")) {
 			// Direct sound to PC
 			IP_target = IP_target_PC;
-			Serial.println("target PC");
+			udp.print("target PC");
 		} else if (MATCHSTR(buf, "target dev")) {
 			// Direct sound to device
 			IP_target = IP_target_device;
-			Serial.println("target dev");
+			udp.print("target dev");
 		} else if (MATCHSTR(buf, "threshold ")) {
 			// Modify envelope threshold
 			ptr += strlen("threshold ");
 			envelope_threshold = atoi(ptr);
-			Serial.print("threshold "); Serial.println(envelope_threshold);
+			udp.print("threshold "); udp.println(envelope_threshold);
+			
 		} else if (MATCHSTR(buf, "sendnow")) {
 			send_sound_util = millis() + 15000;
+			udp.print("sending for 15 sec");
 		} else if (MATCHSTR(buf, "filter")) {
 			enable_highpass_filter = !enable_highpass_filter;
 			if (enable_highpass_filter) {
-				Serial.print("enabled");
+				udp.print("enabled");
 			} else {
-				Serial.print("disabled");
+				udp.print("disabled");
 			}
-			Serial.println(" highpass filter");
+			udp.println(" highpass filter");
+		} else {
+			udp.print("unknown command "); udp.println(buf);
 		}
+		udp.endPacket();
 	}
 }
 

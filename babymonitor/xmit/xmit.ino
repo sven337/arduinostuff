@@ -174,7 +174,7 @@ void setup(void)
 	timer1_isr_init();
 	timer1_attachInterrupt(sample_isr);
 	timer1_enable(TIM_DIV16, TIM_EDGE, TIM_LOOP);
-	timer1_write(clockCyclesPerMicrosecond() / 16 * 80); //80us = 12.5kHz sampling freq
+	timer1_write(clockCyclesPerMicrosecond() / 16 * 50); //80us = 12.5kHz sampling freq
 
 	Serial.println("setup done");
 

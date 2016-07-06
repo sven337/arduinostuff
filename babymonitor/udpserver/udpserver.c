@@ -135,7 +135,7 @@ int main(int argc, char **argv) {
   clientlen = sizeof(clientaddr);
 
   FILE *out = fopen("./out.wav", "w");
-  write_wav_header(out,  -1, 12500);
+  write_wav_header(out,  -1, 20000);
   while (1) {
 
     /*

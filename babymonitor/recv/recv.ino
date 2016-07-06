@@ -32,9 +32,109 @@ bool play_waiting = true;
 bool amplifier_stopped = false;
 long play_waiting_at;
 
-unsigned long I2C_total_time;
+#define ICACHE_RAM_ATTR     __attribute__((section(".iram.text")))
+#define twi_sda mySDA
+#define twi_scl mySCL
+#define twi_dcount 0
+#define twi_clockStretchLimit 10
+#define SDA_LOW()   (GPES = (1 << twi_sda)) //Enable SDA (becomes output and since GPO is 0 for the pin, it will pull the line low)
+#define SDA_HIGH()  (GPEC = (1 << twi_sda)) //Disable SDA (becomes input and since it has pullup it will go high)
+#define SDA_READ()  ((GPI & (1 << twi_sda)) != 0)
+#define SCL_LOW()   (GPES = (1 << twi_scl))
+#define SCL_HIGH()  (GPEC = (1 << twi_scl))
+#define SCL_READ()  ((GPI & (1 << twi_scl)) != 0)
 
-#include "brzo_i2c.h"
+static void twi_delay(unsigned char v){
+  unsigned int i;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+  unsigned int reg;
+  for(i=0;i<v;i++) reg = GPI;
+#pragma GCC diagnostic pop
+} 
+
+static inline ICACHE_RAM_ATTR bool twi_write_start(void) {
+  SCL_HIGH();
+  SDA_HIGH();
+  if (SDA_READ() == 0) return false;
+  SDA_LOW();
+  return true;
+}
+
+static inline ICACHE_RAM_ATTR bool twi_write_stop(void){
+  uint32_t i = 0;
+  SCL_LOW();
+  SDA_LOW();
+  SCL_HIGH();
+  while (SCL_READ() == 0 && (i++) < twi_clockStretchLimit); // Clock stretching
+  SDA_HIGH();
+
+  return true;
+}
+
+static inline ICACHE_RAM_ATTR bool twi_write_bit(bool bit) {
+  uint32_t i = 0;
+  SCL_LOW();
+  if (bit) SDA_HIGH();
+  else SDA_LOW();
+  twi_delay(twi_dcount+1);
+  SCL_HIGH();
+  while (SCL_READ() == 0 && (i++) < twi_clockStretchLimit);// Clock stretching
+  return true;
+}
+
+static inline ICACHE_RAM_ATTR bool twi_read_bit(void) {
+  uint32_t i = 0;
+  SCL_LOW();
+  SDA_HIGH();
+  twi_delay(twi_dcount+2);
+  SCL_HIGH();
+  while (SCL_READ() == 0 && (i++) < twi_clockStretchLimit);// Clock stretching
+  bool bit = SDA_READ();
+  return bit;
+}
+
+static inline ICACHE_RAM_ATTR bool twi_write_byte(unsigned char byte) {
+  unsigned char bit;
+  for (bit = 0; bit < 8; bit++) {
+    twi_write_bit(byte & 0x80);
+    byte <<= 1;
+  }
+  return !twi_read_bit();//NACK/ACK
+}
+
+static inline ICACHE_RAM_ATTR unsigned char twi_read_byte(bool nack) {
+  unsigned char byte = 0;
+  unsigned char bit;
+  for (bit = 0; bit < 8; bit++) byte = (byte << 1) | twi_read_bit();
+  twi_write_bit(nack);
+  return byte;
+}
+
+
+unsigned char inline ICACHE_RAM_ATTR mytwi_writeTo(unsigned char address, unsigned char * buf, unsigned int len, unsigned char sendStop){
+  unsigned int i;
+  if(!twi_write_start()) return 4;//line busy
+  if(!twi_write_byte(((address << 1) | 0) & 0xFF)) {
+    if (sendStop) twi_write_stop();
+    return 2; //received NACK on transmit of address
+  }
+  for(i=0; i<len; i++) {
+    if(!twi_write_byte(buf[i])) {
+      if (sendStop) twi_write_stop();
+      return 3;//received NACK on transmit of data
+    }
+  }
+  if(sendStop) twi_write_stop();
+  i = 0;
+  while(SDA_READ() == 0 && (i++) < 10){
+    SCL_LOW();
+    SCL_HIGH();
+  }
+  return 0;
+}
+
+
 
 static inline ICACHE_RAM_ATTR uint8_t DAC(uint16_t value) 
 {
@@ -42,12 +142,10 @@ static inline ICACHE_RAM_ATTR uint8_t DAC(uint16_t value)
 	per the datasheet for fast write:
 	1 1 0 0 A2 A1 A0 0 <ACK> 0 0 PD1 PD0 D11 D10 D9 D8 <ACK> D7 D6 D5 D4 D3 D2 D1 D0 <ACK> 
 	*/
-	// measured perf at 
 
 	uint8_t buf[2] = { (value >> 8) & 0x0F, (value & 0xFF) };
-	brzo_i2c_start_transaction(0x60, 800000);
-	brzo_i2c_write(buf, 2, false);
-	return brzo_i2c_end_transaction();
+	int ret = mytwi_writeTo(0x60, buf, 2, true);
+	return ret;
 }
 
 void ICACHE_RAM_ATTR playsample_isr(void)
@@ -56,15 +154,11 @@ void ICACHE_RAM_ATTR playsample_isr(void)
 		return;
 	}
 
-	long now = micros();
-
 	DAC(data_buf[current_play_data_buf][play_data_buf_pos]);
 	play_data_buf_pos++;
 	if (play_data_buf_pos >= sizeof(data_buf[0])/sizeof(data_buf[0][0])) {
 		play_data_buf_pos = 0;
 		current_play_data_buf++;
-		Serial.print("I2C total time "); Serial.println(I2C_total_time);
-		I2C_total_time = 0;
 		if (current_play_data_buf == NB_DATA_BUFS) {
 			current_play_data_buf = 0;
 		}
@@ -74,8 +168,6 @@ void ICACHE_RAM_ATTR playsample_isr(void)
 			play_waiting_at = micros();
 		}
 	}
-
-	I2C_total_time += micros() - now;
 }
 
 void ota_onstart(void)
@@ -102,9 +194,8 @@ void setup ( void )
 	Serial.begin ( 115200 );
 	Serial.println("I was built on " __DATE__ " at " __TIME__ "");
 	
-/*	i2c.begin(mySDA, mySCL);
-	i2c.setClock(400000);*/
-	brzo_i2c_setup(mySDA, mySCL, 10);
+	i2c.begin(mySDA, mySCL);
+	i2c.setClock(400000);
 
 	WiFi.mode(WIFI_STA);
 	WiFi.begin ( ssid, password );
@@ -138,7 +229,6 @@ void setup ( void )
 
 	pinMode(AMPLI_MUTE_PIN, OUTPUT);
 	pinMode(AMPLI_SHUTDOWN_PIN, OUTPUT);
-
 
 }
 

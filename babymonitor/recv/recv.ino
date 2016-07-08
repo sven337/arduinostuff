@@ -36,6 +36,9 @@ bool play_waiting = true;
 bool amplifier_stopped = false;
 long play_waiting_at;
 
+bool left_btn_pressed;
+bool right_btn_pressed;
+
 #define ICACHE_RAM_ATTR     __attribute__((section(".iram.text")))
 #define twi_sda mySDA
 #define twi_scl mySCL
@@ -192,6 +195,15 @@ void ota_onerror(ota_error_t err)
 	Serial.print("OTA ERROR:"); Serial.println((int)err);
 }
 
+void left_btn_intr()
+{
+	left_btn_pressed = 1;
+}
+
+void right_btn_intr()
+{
+	right_btn_pressed = 1;
+}
 
 void setup ( void ) 
 {
@@ -237,7 +249,9 @@ void setup ( void )
 	digitalWrite(AMPLI_MUTE_PIN, 0);
 
 	pinMode(LEFT_BTN, INPUT_PULLUP);
+	attachInterrupt(digitalPinToInterrupt(LEFT_BTN), left_btn_intr, FALLING);
 	pinMode(RIGHT_BTN, INPUT_PULLUP);
+	attachInterrupt(digitalPinToInterrupt(RIGHT_BTN), right_btn_intr, FALLING);
 
 	pinMode(LED1, OUTPUT);
 	digitalWrite(LED1, 0);
@@ -281,11 +295,16 @@ void loop ( void )
 		}
 	}
 
-	if (!digitalRead(LEFT_BTN)) {
-			digitalWrite(AMPLI_MUTE_PIN, 0);
-	} 
-	if (!digitalRead(RIGHT_BTN)) {
+	if (left_btn_pressed) {
+			left_btn_pressed = 0;
 			digitalWrite(AMPLI_MUTE_PIN, 1);
+	}
+
+	if (right_btn_pressed) {
+			udp.beginPacket(udp.remoteIP(), 45990);
+			udp.write("sendnow");
+			udp.endPacket();
+			right_btn_pressed = 0;
 	} 
 
 }

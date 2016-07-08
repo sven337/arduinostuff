@@ -14,6 +14,10 @@ const int mySCL = D6;
 const int AMPLI_MUTE_PIN = D2;
 const int AMPLI_SHUTDOWN_PIN = D1;
 
+const int RIGHT_BTN = D3;
+const int LEFT_BTN = D4;
+const int LED1 = D8;
+
 const int udp_recv_port = 45990;
 	
 const IPAddress myip(192, 168, 0, 31);
@@ -229,6 +233,14 @@ void setup ( void )
 
 	pinMode(AMPLI_MUTE_PIN, OUTPUT);
 	pinMode(AMPLI_SHUTDOWN_PIN, OUTPUT);
+	digitalWrite(AMPLI_SHUTDOWN_PIN, 0);
+	digitalWrite(AMPLI_MUTE_PIN, 0);
+
+	pinMode(LEFT_BTN, INPUT_PULLUP);
+	pinMode(RIGHT_BTN, INPUT_PULLUP);
+
+	pinMode(LED1, OUTPUT);
+	digitalWrite(LED1, 0);
 
 }
 
@@ -252,6 +264,7 @@ void loop ( void )
 			digitalWrite(AMPLI_MUTE_PIN, 1);
 			play_waiting = false;
 			amplifier_stopped = false;
+			digitalWrite(LED1, 1);
 		}
 
 		Serial.println("");
@@ -264,6 +277,15 @@ void loop ( void )
 			digitalWrite(AMPLI_SHUTDOWN_PIN, 0);
 			digitalWrite(AMPLI_MUTE_PIN, 0);
 			amplifier_stopped = true;
+			digitalWrite(LED1, 0);
 		}
 	}
+
+	if (!digitalRead(LEFT_BTN)) {
+			digitalWrite(AMPLI_MUTE_PIN, 0);
+	} 
+	if (!digitalRead(RIGHT_BTN)) {
+			digitalWrite(AMPLI_MUTE_PIN, 1);
+	} 
+
 }

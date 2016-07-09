@@ -158,7 +158,7 @@ int main (int argc, char **argv){
    else
         nonacks++;
 
-   usleep(80*700);
+   usleep(48*700);
 
  }/*end of while */ 
   printf("udpclient: acks %d nonacks %d\n",acks,nonacks);

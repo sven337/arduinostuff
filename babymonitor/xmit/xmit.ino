@@ -12,8 +12,7 @@
 WiFiUDP udp;
 const int udp_recv_port = 45990; // for command&control
 const int udp_target_port = 45990; // sound transfer
-const IPAddress myip(192, 168, 0, 32);
-const IPAddress IP_target_device(192, 168, 0, 31);
+const IPAddress IP_target_device(192, 168, 0, 13);
 const IPAddress IP_target_PC(192, 168, 0, 2);
 IPAddress IP_target = IP_target_device;
 
@@ -146,10 +145,8 @@ void setup(void)
 	WiFi.setOutputPower(10); // reduce power to 10dBm = 10mW
 	WiFi.mode(WIFI_STA);
 
-	WiFi.begin ( ssid, password );
-	IPAddress gw(192, 168, 0, 1);
-	IPAddress subnet(255, 255, 255, 0);
-	WiFi.config(myip, gw, subnet);
+	WiFi.begin(ssid, password);
+
 	Serial.print("Connecting to wifi");
 	// Wait for connection
 	while ( WiFi.status() != WL_CONNECTED ) {
@@ -291,6 +288,11 @@ void loop()
 			udp.print("unknown command "); udp.println(buf);
 		}
 		udp.endPacket();
+	}
+
+	// If not sending anything, add a delay to enable modem sleep
+	if (millis() > send_sound_util) {
+		delay(10);
 	}
 }
 

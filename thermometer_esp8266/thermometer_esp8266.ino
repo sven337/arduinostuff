@@ -34,30 +34,43 @@ static void handleRoot() {
 "<html><head><title>Bedroom thermometer</title></head><body>\
     <h1>Hello from bedroom thermometer!</h1>\
     <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d = %d ms</p>\
-	<p>Current temperature is %d\n</p> \
+	<p>Current temperature is %f C\n</p> \
   </body></html>",
 
-		__DATE__, __TIME__, hr, min % 60, sec % 60, millis(),
-		(int)(100*temperature)
+		__DATE__, __TIME__, hr, min % 60, sec % 60, (int)millis(),
+		temperature
 	);
 	websrv.send ( 200, "text/html", temp );
 }
 
-int analogRead(uint8_t pin)
+void ota_onstart(void)
 {
 }
 
+void ota_onprogress(unsigned int sz, unsigned int total)
+{
+	Serial.print("OTA: "); Serial.print(sz); Serial.print("/"); Serial.print(total);
+	Serial.print("="); Serial.print(100*sz/total); Serial.println("%%");
+}
+
+void ota_onerror(ota_error_t err)
+{
+	Serial.print("OTA ERROR:"); Serial.println((int)err);
+}
+
 void setup ( void ) {
-	Serial.setDebugOutput(1);
-	Serial.begin ( 57600 );
+	Serial.begin(115200);
+
+	Serial.println(ESP.getResetReason());
+	WiFi.mode(WIFI_STA);
+	WiFi.setOutputPower(10); // reduce power to 10dBm = 10mW
+
 	WiFi.begin ( ssid, password );
-	IPAddress myip(192, 168, 0, 9);
-	IPAddress gw(192, 168, 0, 254);
-	IPAddress subnet(255, 255, 255, 0);
-	WiFi.config(myip, gw, subnet);
+
+	WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
 	Serial.println ( "" );
 	Serial.print("Connecting to ");
-	Serial.print(ssid); Serial.print(" "); Serial.print(password);
+	Serial.print(ssid); Serial.print(" ");
 
 	// Wait for connection
 	while ( WiFi.status() != WL_CONNECTED ) {
@@ -75,6 +88,11 @@ void setup ( void ) {
 	websrv.on ( "/", handleRoot );
 
 	websrv.begin();
+
+	ArduinoOTA.onStart(ota_onstart);
+	ArduinoOTA.onError(ota_onerror);
+	ArduinoOTA.onProgress(ota_onprogress);
+	ArduinoOTA.setHostname("bedroom-thermometer");
 	ArduinoOTA.begin();
 }
 
@@ -118,6 +136,36 @@ void send_temperature_update()
 		// HTTP header has been send and Server response header has been handled
 		Serial.printf("[HTTP] GET... code: %d\n", httpCode);
 	}
+
+	http.end();
+}
+
+bool must_do_deep_sleep()
+{
+	HTTPClient http;
+	char URI[150];
+
+	sprintf(URI, "http://192.168.0.6:5000/deep_sleep_mode/");
+	http.begin(URI); 
+
+	int httpCode = http.GET();
+
+	if (httpCode == HTTP_CODE_OK) {
+		// HTTP header has been send and Server response header has been handled
+		Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+		String payload = http.getString();
+		Serial.println(payload);
+
+		if (payload.startsWith("1")) {
+			return true;
+		} else {
+			return false;
+		}
+	} else {
+		return false;
+	}
+
+	http.end();
 }
 
 void loop ( void ) {
@@ -145,15 +193,9 @@ void loop ( void ) {
 		ds.select(addr);    
 		ds.write(0xBE);
 
-		Serial.print("  Data = ");
-		Serial.print(present, HEX);
-		Serial.print(" ");
 		for (int i = 0; i < 9; i++) {
 			data[i] = ds.read();
-			Serial.print(data[i], HEX);
-			Serial.print(" ");
 		}
-		Serial.println();
 
 		// Convert the data to actual temperature
 		// because the result is a 16 bit signed integer, it should
@@ -185,10 +227,15 @@ void loop ( void ) {
 	}
 	
 	if (millis() > send_temperature_at) {
-		send_temperature_at = millis() + 15L * 60L * 1000L;
+		send_temperature_at = millis() + 5L * 60L * 1000L;
 		send_temperature_update();
-	}
 	
-
-
+		// Call my server to check if we need to deep sleep or not. This is used to enable OTAs from my desk. :)
+		if (must_do_deep_sleep()) {
+			Serial.println("deepsleep go");	
+			ESP.deepSleep(5000*60000L); 
+		}
+	}
+   
+	delay(250);
 }

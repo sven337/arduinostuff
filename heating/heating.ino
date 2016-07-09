@@ -2,11 +2,10 @@
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
-#define UPDATER_NO_MDNS
-#include "ESP8266mDNS.h"
-#include <ArduinoOTA.h>
-
+#include <user_interface.h>
 #include "wifi_params.h"
+
+// This device uses an ESP201, a device with 512kB flash. OTAs are impossible without hacking the Arduino framewark.
 
 ESP8266WebServer websrv (80);
 WiFiUDP udp;
@@ -19,6 +18,8 @@ int pwm;
 
 unsigned long int forced_heating_until = 0;
 unsigned long int send_next_ping_at = 15*60*1000;
+
+bool pushbtn_pressed = false;
 
 static void handleRoot() {
 	char temp[1024];
@@ -40,8 +41,9 @@ static void handleRoot() {
 	websrv.send ( 200, "text/html", temp );
 }
 
-int analogRead(uint8_t pin)
+static void pushbtn_intr(void)
 {
+	pushbtn_pressed = true;
 }
 
 void setup ( void ) {
@@ -49,11 +51,10 @@ void setup ( void ) {
 	pinMode(pushbtn, INPUT_PULLUP);
 	digitalWrite(chaudiere, 1);
 	Serial.begin ( 57600 );
+	
+	WiFi.setOutputPower(10); // reduce power to 10dBm = 10mW
+	WiFi.mode(WIFI_STA);
 	WiFi.begin ( ssid, password );
-	IPAddress myip(192, 168, 0, 33);
-	IPAddress gw(192, 168, 0, 254);
-	IPAddress subnet(255, 255, 255, 0);
-	WiFi.config(myip, gw, subnet);
 	Serial.println ( "" );
 
 	// Wait for connection
@@ -72,7 +73,8 @@ void setup ( void ) {
 	websrv.on ( "/", handleRoot );
 
 	websrv.begin();
-	ArduinoOTA.begin();
+		  
+	attachInterrupt(digitalPinToInterrupt(pushbtn), pushbtn_intr, FALLING);
 }
 
 void udp_send(const char *str)
@@ -131,16 +133,13 @@ static void parse_cmd(const char *buf)
 }
 
 void loop ( void ) {
-	ArduinoOTA.handle();
 	websrv.handleClient();
 
 	bool force_heating = false;
 
-	if (!digitalRead(pushbtn)) {
-		delay(100);
-		if (!digitalRead(pushbtn)) {
-			force_heating = true;
-		}
+	if (pushbtn_pressed) {
+		force_heating = true;
+		pushbtn_pressed = false;
 	}
 
 	if (force_heating) {
@@ -154,6 +153,7 @@ void loop ( void ) {
 		if (forced_heating_until < millis()) {
 			forced_heating_until = 0;
 		}
+		Serial.println("Forcing heating");
 	}
 
 	if (millis() > forced_heating_until) {
@@ -176,4 +176,6 @@ void loop ( void ) {
 
 		parse_cmd(&packetBuffer[0]);
 	}
+
+	delay(50); // needed to take advantage of modem sleep (70mA -> 50mA)
 }

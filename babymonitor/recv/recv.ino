@@ -20,8 +20,6 @@ const int LED1 = D8;
 
 const int udp_recv_port = 45990;
 	
-const IPAddress myip(192, 168, 0, 31);
-
 WiFiUDP udp;
 TwoWire i2c;
 
@@ -214,10 +212,9 @@ void setup ( void )
 	i2c.setClock(400000);
 
 	WiFi.mode(WIFI_STA);
-	WiFi.begin ( ssid, password );
-	IPAddress gw(192, 168, 0, 1);
-	IPAddress subnet(255, 255, 255, 0);
-	WiFi.config(myip, gw, subnet);
+	WiFi.begin(ssid, password);
+	WiFi.setSleepMode(WIFI_MODEM_SLEEP);
+
 	Serial.print("Connecting to wifi");
 	while ( WiFi.status() != WL_CONNECTED ) {
 		delay ( 500 );
@@ -284,6 +281,7 @@ void loop ( void )
 		Serial.println("");
 	}
 
+	// If not playing anything, but amplifier is still up
 	if (!amplifier_stopped && play_waiting) {
 		if ((micros() - play_waiting_at) > 2000 * 1000) {
 			// If nothing has been played for two seconds, shut down the amplifier 
@@ -297,14 +295,22 @@ void loop ( void )
 
 	if (left_btn_pressed) {
 			left_btn_pressed = 0;
-			digitalWrite(AMPLI_MUTE_PIN, 1);
+			digitalWrite(AMPLI_MUTE_PIN, 0);
+			digitalWrite(AMPLI_SHUTDOWN_PIN, 0);
 	}
 
 	if (right_btn_pressed) {
+			digitalWrite(AMPLI_SHUTDOWN_PIN, 1);
+			digitalWrite(AMPLI_MUTE_PIN, 1);
 			udp.beginPacket(udp.remoteIP(), 45990);
 			udp.write("sendnow");
 			udp.endPacket();
 			right_btn_pressed = 0;
 	} 
+
+	// If the amplifier is stopped, add a delay for power saving
+	if (amplifier_stopped) {
+		delay(10);
+	}
 
 }

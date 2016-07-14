@@ -7,9 +7,13 @@
 #include "nRF24L01.h"
 #include "RF24.h"
 
+#define HAS_SOLAR_PANEL 0
+
 const int CE_PIN = 9;
 const int CSN_PIN = 8;
 const int BATTERY_PIN = A3;
+const int SOLAR_PIN = A0;
+const int SOLAR_RESISTOR_PIN = A1;
 const int LED_YELLOW = 5;
 const int LED_RED = 4;
 const int DS18B20_PIN = 7;
@@ -24,8 +28,9 @@ static unsigned long last_ping_at = 0;
 int init_failed = 0;
 
 //const uint8_t thermometer_identification_letter = 'L'; // "living room"
-const uint8_t thermometer_identification_letter = 'E'; // "exterior"
+//const uint8_t thermometer_identification_letter = 'E'; // "exterior"
 //const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
+const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
 
 ISR(WDT_vect)
 {
@@ -35,8 +40,8 @@ ISR(WDT_vect)
 int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
 	uint8_t payload[4] = { p0, p1, p2, p3 };
+	digitalWrite(LED_YELLOW, 1);
 	last_ping_at = millis();
-	radio.powerUp();
 	delayMicroseconds(5000);
 	bool ok = radio.write(payload, 4);
 	if (ok) 
@@ -44,12 +49,13 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	else
 		Serial.println("send KO");
 	
-	radio.powerDown();
+	digitalWrite(LED_YELLOW, 0);
 
 	if (!ok) {
+		digitalWrite(LED_RED, 1);
 		return -1;
 	}
-
+	digitalWrite(LED_RED, 0);
 	return 0;
 }
 
@@ -57,6 +63,24 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 int radio_send_bat(uint16_t bat)
 {
 	return radio_send('B', thermometer_identification_letter, (bat >> 8) & 0xFF, bat & 0xFF);
+}
+
+int radio_send_panel(uint16_t panel_voltage)
+{
+	return radio_send('S', thermometer_identification_letter, (panel_voltage >> 8) & 0xFF, panel_voltage & 0xFF);
+}
+
+int radio_send_current(uint16_t panel_voltage, uint16_t panel_resistor_voltage)
+{
+	// Panel -(-> SOLAR_PIN) - resistor (-> SOLAR_RESISTOR_PIN) - circuit
+	// So the current is the voltage across the resistor, which is panel_voltage - panel_resistor_voltage
+	// It's not supposed to be negative but I've observed -1 in some cases, so make the difference signed.
+	int16_t value = panel_voltage - panel_resistor_voltage;
+
+	// Resistor is set to 22 ohm
+	// U = R.I so I = U / 22, send it *1000 to see something
+	value = 1000 * (value  * 3.3f / 1024) / 22;
+	return radio_send('C', thermometer_identification_letter, (value >> 8) & 0xFF, value & 0xFF);
 }
 
 void setup(){
@@ -79,8 +103,8 @@ void setup(){
 	radio.printDetails();
 
 	if ((radio.getDataRate() != RF24_250KBPS) ||
-		(radio.getCRCLength() != RF24_CRC_16) || 
-		(radio.getChannel() != 95)) {
+		(radio.getCRCLength() != RF24_CRC_16) /*|| 
+		(radio.getChannel() != 95)*/) {
 		// failed to initialize radio
 		init_failed = 1;
 	}
@@ -101,6 +125,8 @@ void setup(){
 	delay(100);
 	digitalWrite(LED_RED, 0);
 	digitalWrite(LED_YELLOW, 0);
+
+	radio.powerDown();
 }
 
 float battery_voltage(uint16_t battery_level)
@@ -127,71 +153,80 @@ void loop()
 	}
 
 	uint16_t battery_level = analogRead(BATTERY_PIN);
+#if HAS_SOLAR_PANEL
+	uint16_t panel_voltage = analogRead(SOLAR_PIN);
+	uint16_t resistor_voltage = analogRead(SOLAR_RESISTOR_PIN);
+#endif
+	radio.powerUp();
 	bool fail = radio_send_bat(battery_level);
-
-	if (fail) {
-		digitalWrite(LED_RED, 1);
-	}
+#if HAS_SOLAR_PANEL
+	fail &= radio_send_panel(panel_voltage);
+	fail &= radio_send_current(panel_voltage, resistor_voltage);
+#endif
+//	radio.txStandBy();
 
 	uint8_t addr[8];
 	uint8_t data[12];
-	int i = 4;
+	uint8_t present;
+	int16_t raw;
+	int i = 20;
 	while(!ds.search(addr) && i--) {
 		Serial.println("No more addresses.");
 		ds.reset_search();
 		delay(250);
-	}
-    if (!i) {
-		return;
+		if (!i) {
+			// Indicate that we couldn't find the thermometer
+			radio_send('T', thermometer_identification_letter, 0xFF, 0xFF);
+			goto sleep;
+		}
 	}
 
 	ds.reset();
 	ds.select(addr);
 	ds.write(0x44, 1);
-	delay(800);
-	uint8_t present = ds.reset();
+	delay(1000);
+	present = ds.reset();
 	ds.select(addr);    
 	ds.write(0xBE);
 
-	Serial.print("  Data = ");
-	Serial.print(present, HEX);
-	Serial.print(" ");
 	for (int i = 0; i < 9; i++) {
 		data[i] = ds.read();
-		Serial.print(data[i], HEX);
-		Serial.print(" ");
 	}
-	Serial.println();
 
-	// Convert the data to actual temperature
-	// because the result is a 16 bit signed integer, it should
-	// be stored to an "int16_t" type, which is always 16 bits
-	// even when compiled on a 32 bit processor.
-	int16_t raw = (data[1] << 8) | data[0];
-    byte cfg = (data[4] & 0x60);
-    // at lower res, the low bits are undefined, so let's zero them
-    if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
-    else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
-    else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
-    //// default is 12 bit resolution, 750 ms conversion time
-	printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
+	
+	if (data[8] != OneWire::crc8(data,8)) {
+		Serial.println("ERROR: CRC didn't match");
+		// Indicate that we read garbage
+		radio_send('T', thermometer_identification_letter, 0xFF, 0xFF);
+		goto sleep;
+	} else {
+		raw = (data[1] << 8) | data[0];
+		byte cfg = (data[4] & 0x60);
+		// at lower res, the low bits are undefined, so let's zero them
+		if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+		else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+		else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+		//// default is 12 bit resolution, 750 ms conversion time
+		printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
+	}
 
-	i = 100;
+	i = 10000;
 
 	while (i--) {
-		if (!radio_send('T', thermometer_identification_letter, (raw >> 8) & 0xFF, raw & 0xFF)) {
+	    fail = radio_send('T', thermometer_identification_letter, (raw >> 8) & 0xFF, raw & 0xFF);
+		if (!fail) {
 			break;
 		}
 
 		Serial.println("radio message not sent, not sleeping");
 		delay(2000);
 	}
-	
+sleep:	
+	radio.powerDown();
 	Serial.println("going to sleep now");
 	Serial.flush();
 	Sleepy::loseSomeTime(32768L);
 	Serial.println("waking up");
-	digitalWrite(LED_RED, 0);
 
 	for (int i = 1; i < 15L*60L*1000L / 32768L; i++) {
 		if (battery_voltage(battery_level) >= 1.4f) {

@@ -135,6 +135,7 @@ int main(int argc, char **argv) {
   clientlen = sizeof(clientaddr);
 
   FILE *out = fopen("./out.wav", "w");
+  FILE *out_raw = fopen("./out.raw", "w");
   write_wav_header(out,  -1, 20000);
   while (1) {
 
@@ -158,7 +159,7 @@ int main(int argc, char **argv) {
     printf("server received datagram from %s (%s)\n", 
 	   hostp ? hostp->h_name : "unknown", hostaddrp);
 
-    printf("server received %d/%d bytes: ", strlen(buf), n);
+	fwrite(buf, 1, n, out_raw);
 	int i;
 	for (i = 0; i < n; i+=2) {
 		uint16_t value = ((buf[i+1] & 0x0F) <<8 | (buf[i] &0xFF)) & 0x0FFF;
@@ -172,4 +173,5 @@ int main(int argc, char **argv) {
     
   }
   fclose(out);
+  fclose(out_raw);
 }

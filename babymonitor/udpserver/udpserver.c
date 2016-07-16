@@ -87,6 +87,43 @@ void error(char *msg) {
   exit(1);
 }
 
+int do_undelta7(const uint8_t *val, int sz, uint16_t *out)
+{
+	// Implement delta 7 decompression.
+	// First bit = 0 <=> uncompressed 15 bits following 
+	// First bit = 1 <=> 7 bits follow representing delta
+	// must switch to big endian...
+	uint16_t last = 0;
+	uint8_t *ptr = (uint8_t *)&out[0];
+	const uint8_t *start = ptr;
+	for (int i = 0; i < sz; i++) {
+		uint16_t *ptr16 = (uint16_t *)ptr;
+		const int8_t firstbyte = val[i];
+		if (firstbyte & 0x80) {
+			// Delta7 compressed
+			// byte is CSMMMMMM
+			int8_t delta = firstbyte & 0x3F;
+			if (firstbyte & 0x40) {
+				delta = -delta;
+			}
+			const uint16_t value = last + delta;
+			*ptr16 = value;
+			ptr += 2;
+
+			last = value;
+		} else {
+			// uncompressed -- switch bytes back to LE
+			*ptr++ = val[i+1];
+			*ptr++ = val[i];
+			last = val[i+1] | val[i] << 8;
+			i++;
+		}
+	}
+
+	return ptr - start;
+
+}
+
 int main(int argc, char **argv) {
   int sockfd; /* socket */
   int clientlen; /* byte size of client's address */
@@ -160,9 +197,12 @@ int main(int argc, char **argv) {
 	   hostp ? hostp->h_name : "unknown", hostaddrp);
 
 	fwrite(buf, 1, n, out_raw);
+	uint16_t decompressed_buffer[n*2];
+	int sz = do_undelta7(buf, n, decompressed_buffer);
 	int i;
-	for (i = 0; i < n; i+=2) {
-		uint16_t value = ((buf[i+1] & 0x0F) <<8 | (buf[i] &0xFF)) & 0x0FFF;
+	for (i = 0; i < sz/2; i++) {
+//		uint16_t value = ((decompressed_buffer[i+1] & 0x0F) <<8 | (decompressed_buffer[i] &0xFF)) & 0x0FFF;
+		uint16_t value = decompressed_buffer[i];
 		printf("%u ", value);
 		int16_t v = (value - 0x1000/2) << 4;
 		printf("(%d)\n", v);

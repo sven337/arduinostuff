@@ -255,12 +255,50 @@ void setup ( void )
 
 }
 
+int do_undelta7(const uint8_t *val, int sz, uint16_t *out)
+{
+    // Implement delta 7 decompression.
+    // First bit = 0 <=> uncompressed 15 bits following 
+    // First bit = 1 <=> 7 bits follow representing delta
+    // must switch to big endian...
+    uint16_t last = 0;
+    uint8_t *ptr = (uint8_t *)&out[0];
+    const uint8_t *start = ptr;
+    for (int i = 0; i < sz; i++) {
+        uint16_t *ptr16 = (uint16_t *)ptr;
+        const int8_t firstbyte = val[i];
+        if (firstbyte & 0x80) {
+            // Delta7 compressed
+            // byte is CSMMMMMM
+            int8_t delta = firstbyte & 0x3F;
+            if (firstbyte & 0x40) {
+                delta = -delta;
+            }
+            const uint16_t value = last + delta;
+            *ptr16 = value;
+            ptr += 2;
+
+            last = value;
+        } else {
+            // uncompressed -- switch bytes back to LE
+            *ptr++ = val[i+1];
+            *ptr++ = val[i];
+            last = val[i+1] | val[i] << 8;
+            i++;
+        }
+    }
+
+    return ptr - start;
+
+}
+
 void loop ( void ) 
 {
 	ArduinoOTA.handle();
 	int sz = udp.parsePacket();
 	if (sz) {
-		udp.read((unsigned char *)&data_buf[current_recv_data_buf][0], sz);
+		uint8_t buf[sz];
+		udp.read(&buf[0], sz);
 		current_recv_data_buf++;
 		if (current_recv_data_buf == NB_DATA_BUFS) {
 			current_recv_data_buf = 0;
@@ -268,6 +306,7 @@ void loop ( void )
 				Serial.println("buffer overflow when receiving");
 			}
 		}
+		do_undelta7(buf, sz, &data_buf[current_recv_data_buf][0]);
 		if (play_waiting) {
 			Serial.print("Restarting play, was waiting (us)"); Serial.println(micros() - play_waiting_at);
 			// Re-enable *then* unmute in that order to avoid pops

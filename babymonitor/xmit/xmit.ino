@@ -84,9 +84,9 @@ static inline ICACHE_RAM_ATTR uint16_t transfer16(void) {
 	while(SPI1CMD & SPIBUSY) {}
 
 	/* Follow MCP3201's datasheet: return value looks like this:
-	xxCBA987 65432101
+	xxxBA987 65432101
 	We want 
-	76543210 000CBA98
+	76543210 0000BA98
 
 	So swap the bytes, select 12 bits starting at bit 1, and shift right by one.
 	*/
@@ -204,6 +204,28 @@ static float filterloop(float input)
       }
   }
 
+uint8_t *delta7_sample(uint16_t last, uint16_t *readptr, uint8_t *writeptr)
+{
+	const uint8_t lowbyte1 = *((uint8_t *)readptr);
+	const uint8_t highbyte1 = *((uint8_t *)readptr+1);
+	const uint16_t val = *readptr;
+
+	const int32_t diff = val - last;
+	if (diff > -64 && diff < 64) {
+		// 7bit delta possible
+		// Encode the delta as "sign and magnitude" format. 
+		// CSMMMMMM (compressed signed magnitude^6)
+		int8_t out = 0x80 | ((diff < 0) ? 0x40 : 0x0) | abs(diff);
+		*writeptr++ = out;
+	} else {
+		// 7bit delta impossible, output as-is
+		*writeptr++ = highbyte1;
+		*writeptr++ = lowbyte1;
+	}
+
+	return writeptr;
+}
+
 void loop() 
 {
 	ArduinoOTA.handle();
@@ -217,19 +239,27 @@ void loop()
 		int32_t envelope_value = 0;
 
 		int32_t now = millis();
+		uint8_t *writeptr = (uint8_t *)(&adc_buf[!current_adc_buf][0]);
+		uint16_t *readptr;
+		uint16_t last = 0;
 		for (unsigned int i = 0; i < number_of_samples; i++) {
-			int32_t val = adc_buf[!current_adc_buf][i];
+			readptr = &adc_buf[!current_adc_buf][i];
+			int32_t val = *readptr;
 			int32_t rectified;
 
 			if (enable_highpass_filter) {
-				adc_buf[!current_adc_buf][i] = filterloop(val) + 2048;
+				*readptr = filterloop(val) + 2048;
+				val = *readptr;
 			}
-			val = adc_buf[!current_adc_buf][i];
 
 			rectified = abs(val - silence_value);
 
 			accum_silence += val;
 			envelope_value += rectified;
+
+			// delta7-compress the data
+			writeptr = delta7_sample(last, readptr, writeptr);
+			last = val;
 		}
 		accum_silence /= number_of_samples;
 		envelope_value /= number_of_samples;
@@ -242,7 +272,7 @@ void loop()
 
 		if (millis() < send_sound_util) {
 			udp.beginPacket(IP_target, udp_target_port);
-			udp.write((const uint8_t *)(&adc_buf[!current_adc_buf][0]), sizeof(adc_buf[0]));
+			udp.write((const uint8_t *)(&adc_buf[!current_adc_buf][0]), writeptr - (uint8_t *)&adc_buf[!current_adc_buf][0]);
 			udp.endPacket();
 		}
 		send_samples_now = 0;

@@ -27,10 +27,10 @@ static unsigned long last_ping_at = 0;
 
 int init_failed = 0;
 
-//const uint8_t thermometer_identification_letter = 'L'; // "living room"
+const uint8_t thermometer_identification_letter = 'L'; // "living room"
 //const uint8_t thermometer_identification_letter = 'E'; // "exterior"
 //const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
-const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
+//const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
 
 ISR(WDT_vect)
 {
@@ -169,7 +169,7 @@ void loop()
 	uint8_t data[12];
 	uint8_t present;
 	int16_t raw;
-	int i = 20;
+	int i = 5;
 	while(!ds.search(addr) && i--) {
 		Serial.println("No more addresses.");
 		ds.reset_search();
@@ -210,7 +210,7 @@ void loop()
 		printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
 	}
 
-	i = 10000;
+	i = 100;
 
 	while (i--) {
 	    fail = radio_send('T', thermometer_identification_letter, (raw >> 8) & 0xFF, raw & 0xFF);
@@ -229,10 +229,12 @@ sleep:
 	Serial.println("waking up");
 
 	for (int i = 1; i < 15L*60L*1000L / 32768L; i++) {
+#if HAS_SOLAR_PANEL
 		if (battery_voltage(battery_level) >= 1.4f) {
 			// Battery is overcharged, try to waste energy!
 			delay(10000);
 		}
+#endif
 		if (!Sleepy::loseSomeTime(32768L)) {
 			Serial.println("woken up by intr");
 		}

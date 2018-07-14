@@ -9,7 +9,16 @@
 
 #define HAS_SOLAR_PANEL 0
 #define HAS_RF24 1
+#define HAS_LCD 0
 
+#if HAS_LCD
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C	lcd(0x27,2,1,0,4,5,6,7); // 0x27 is the I2C bus address for an unmodified backpack
+#endif
+
+const int SCL_PIN = A5;
+const int SDA_PIN = A4;
 const int CE_PIN = 9;
 const int CSN_PIN = 8;
 const int BATTERY_PIN = A3;
@@ -30,10 +39,10 @@ static unsigned long last_ping_at = 0;
 
 int init_failed = 0;
 
-const uint8_t thermometer_identification_letter = 'L'; // "living room"
+//const uint8_t thermometer_identification_letter = 'L'; // "living room"
 //const uint8_t thermometer_identification_letter = 'E'; // "exterior"
 //const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
-//const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
+const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
 
 ISR(WDT_vect)
 {
@@ -114,6 +123,14 @@ void setup(){
 		// failed to initialize radio
 		init_failed = 1;
 	}
+#endif
+
+#if HAS_LCD
+	lcd.begin (16,2); // for 16 x 2 LCD module
+	lcd.setBacklightPin(3,POSITIVE);
+	lcd.setBacklight(HIGH);
+	lcd.home();
+	lcd.print("Hello");
 #endif
 
 	pinMode(LED_YELLOW, OUTPUT);
@@ -220,6 +237,12 @@ void loop()
 		printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
 	}
 
+#if HAS_LCD
+	lcd.home();
+	lcd.print("Temperature");
+	lcd.setCursor(0,1);
+	lcd.print((float)raw/16.0);
+#endif
 	i = 100;
 
 	while (i--) {

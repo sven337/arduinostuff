@@ -5,18 +5,15 @@
 SoftwareSerial edfSerial(2, 6); //RX, TX (unused TX)
 
 
-// teleinfo code from https://blog.antoineve.me/2015/05/30/teleinformation-erdf-avec-arduino/
 #define startFrame 0x02
 #define endFrame 0x03
-#define startLine 0x0A
-#define endLine 0x0D
 
 char teleinfo_buf[1024];
 int teleinfo_cur = 0;
 
 void send_frame()
 {
-    printf("Got frame\r\n%s\r\n", teleinfo_buf);
+    printf("\r\r\n%s\r\r\n", teleinfo_buf); // printable code for a frame: start and end with \r\r\n
 }
 
 void consume_teleinfo()
@@ -26,7 +23,6 @@ void consume_teleinfo()
     while (edfSerial.available()) {
         char c = edfSerial.read() & 0x7F;
         if (c == startFrame) {
-            printf("Starting frame\r\n");
             inFrame = true;
             teleinfo_cur = 0;
             teleinfo_buf[teleinfo_cur] = 0;

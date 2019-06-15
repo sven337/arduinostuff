@@ -30,13 +30,15 @@ char teleinfo_buf[255];
 int teleinfo_cur = 0;
 
 OneWire ds(DS18B20_PIN);
+uint32_t send_next_temperature_at = 1000;
+const uint8_t thermometer_identification_letter = 'P'; // "pantry"
 
 char serial_cmd[255];
 int serial_cmd_cur = 0;
 
-void send_frame()
+void send_line()
 {
-    printf("\r\r\n%s\r\r\n", teleinfo_buf); // printable code for a frame: start and end with \r\r\n
+    printf("TELE %s", teleinfo_buf);
 }
 
 void consume_teleinfo()
@@ -45,6 +47,8 @@ void consume_teleinfo()
 
     while (edfSerial.available()) {
         char c = edfSerial.read() & 0x7F;
+        // I tried full frame buffering, but it's hard to handle given that the serial line is also used for RF24
+        // Do line buffering instead and prefix each teleinfo line with TELE
         if (c == startFrame) {
             inFrame = true;
             teleinfo_cur = 0;
@@ -54,13 +58,23 @@ void consume_teleinfo()
             inFrame = false;
             teleinfo_buf[teleinfo_cur] = 0;
             teleinfo_cur = 0;
-            send_frame();
+            continue;
+        }
+        
+        if (!inFrame) {
             continue;
         }
 
-        if (inFrame) {
-            teleinfo_buf[teleinfo_cur++] = c;
+        if (c == '\n' || c == '\r') {
+            teleinfo_buf[teleinfo_cur++] = '\n';
+            teleinfo_buf[teleinfo_cur] = 0;
+            if (teleinfo_cur > 1) {
+                send_line();
+            }
+            teleinfo_cur = 0;
+            continue;
         }
+        teleinfo_buf[teleinfo_cur++] = c;
     }
 }
 
@@ -149,13 +163,13 @@ void consume_rf24()
 
 	 while (rf24.available(&pipe)) {
 		rf24.read(data, 4);
-        printf("RF24 0x%x 0x%x 0x%x 0x%x\n", data[0], data[1], data[2], data[3]);
+        printf("RF24 p%d 0x%x 0x%x 0x%x 0x%x\n", pipe, data[0], data[1], data[2], data[3]);
     }
 }
 
 void serial_command(char *cmd)
 {
-    printf("Got command \"%s\"\n", cmd);
+    printf("Command \"%s\"\n", cmd);
 #define MATCHSTR(BUF,STR) !strncasecmp(BUF, STR, strlen(STR))
     if (MATCHSTR(cmd, "LEDLAMP ")) {
         char *p = cmd + strlen("LEDLAMP ");
@@ -182,6 +196,56 @@ void serial_command(char *cmd)
     }
 }
 
+void send_temperature()
+{
+	uint8_t addr[8];
+	uint8_t data[12];
+	uint8_t present;
+	int16_t raw;
+	int i = 2;
+	while(!ds.search(addr) && i--) {
+		ds.reset_search();
+		delay(250);
+		if (!i) {
+			// Indicate that we couldn't find the thermometer
+			send_rf24_cmd(pipe_thermometer, 'T', thermometer_identification_letter, 0xFF, 0xFF);
+            return;
+		}
+	}
+
+	ds.reset();
+	ds.select(addr);
+	ds.write(0x44, 1);
+	delay(1000);
+	present = ds.reset();
+	ds.select(addr);    
+	ds.write(0xBE);
+
+	for (int i = 0; i < 9; i++) {
+		data[i] = ds.read();
+	}
+
+	
+	if (data[8] != OneWire::crc8(data,8)) {
+		Serial.println("ERROR: CRC didn't match");
+		// Indicate that we read garbage
+		send_rf24_cmd(pipe_thermometer, 'T', thermometer_identification_letter, 0xFF, 0xFF);
+        return;
+	} else {
+		raw = (data[1] << 8) | data[0];
+		byte cfg = (data[4] & 0x60);
+		// at lower res, the low bits are undefined, so let's zero them
+		if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+		else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+		else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+		//// default is 12 bit resolution, 750 ms conversion time
+		printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
+	}
+
+    // Simulate receiving an RF24 thermometer command, to blend in with the other, actual RF24 thermometers
+    printf("RF24 p%d 0x%x 0x%x 0x%x 0x%x\n", 'T', PIPE_THERMOMETER_ID, thermometer_identification_letter, (raw>>8) & 0xFF, raw & 0xFF);
+}
+
 void loop()
 {
     if (edfSerial.available()) {
@@ -204,4 +268,9 @@ void loop()
     }
 
     consume_rf24();
+
+    if (millis() > send_next_temperature_at) {
+        send_temperature();
+        send_next_temperature_at += 120000; // 2 minute temperature data
+    }
 }

@@ -243,7 +243,7 @@ void send_temperature()
 	}
 
     // Simulate receiving an RF24 thermometer command, to blend in with the other, actual RF24 thermometers
-    printf("RF24 p%d 0x%x 0x%x 0x%x 0x%x\n", 'T', PIPE_THERMOMETER_ID, thermometer_identification_letter, (raw>>8) & 0xFF, raw & 0xFF);
+    printf("RF24 p%d 0x%x 0x%x 0x%x 0x%x\n", PIPE_THERMOMETER_ID, 'T', thermometer_identification_letter, (raw>>8) & 0xFF, raw & 0xFF);
 }
 
 void loop()

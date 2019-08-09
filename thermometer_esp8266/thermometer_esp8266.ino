@@ -92,7 +92,7 @@ void setup ( void ) {
 	ArduinoOTA.onStart(ota_onstart);
 	ArduinoOTA.onError(ota_onerror);
 	ArduinoOTA.onProgress(ota_onprogress);
-	ArduinoOTA.setHostname("bedroom-thermometer");
+	ArduinoOTA.setHostname("esp8266-thermometer");
 	ArduinoOTA.begin();
 }
 
@@ -122,7 +122,7 @@ void send_temperature_update()
 	HTTPClient http;
 	char URI[150];
 
-	sprintf(URI, "http://192.168.0.6:5000/update/temperature/bed/%d.%d", (int)temperature, (int)((temperature-(int)temperature)*100.0));
+	sprintf(URI, "http://192.168.1.6:5000/update/temperature/bed/%d.%d", (int)temperature, (int)((temperature-(int)temperature)*100.0));
 	Serial.print("[HTTP] begin...\n");
 	Serial.print(URI);
 
@@ -145,7 +145,7 @@ bool must_do_deep_sleep()
 	HTTPClient http;
 	char URI[150];
 
-	sprintf(URI, "http://192.168.0.6:5000/deep_sleep_mode/");
+	sprintf(URI, "http://192.168.1.6:5000/deep_sleep_mode/");
 	http.begin(URI); 
 
 	int httpCode = http.GET();

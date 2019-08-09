@@ -33,6 +33,13 @@ OneWire ds(DS18B20_PIN);
 uint32_t send_next_temperature_at = 1000;
 const uint8_t thermometer_identification_letter = 'P'; // "pantry"
 
+struct {
+    uint8_t addr[8];
+    uint8_t letter;
+} thermometer_letter_from_addr[] = {
+        {{ 0x28, 0xff, 0xbd, 0xd3, 0x90, 0x15, 0x03, 0xbb }, 'P'},
+};
+
 char serial_cmd[255];
 int serial_cmd_cur = 0;
 
@@ -196,6 +203,26 @@ void serial_command(char *cmd)
     }
 }
 
+uint8_t therm_letter_from_address(uint8_t addr[8])
+{
+    for (int i = 0; i < sizeof(thermometer_letter_from_addr)/sizeof(thermometer_letter_from_addr[0]); i++) {
+        if (!memcmp(addr, thermometer_letter_from_addr[i].addr, 8)) {
+            printf("found letter %c\n", thermometer_letter_from_addr[i].letter);
+            return thermometer_letter_from_addr[i].letter;
+        }
+    }
+
+    printf("Did not identify letter for thermometer addr %x %x %x %x %x %x %x %x\n", 
+            addr[0],
+            addr[1],
+            addr[2],
+            addr[3],
+            addr[4],
+            addr[5],
+            addr[6],
+            addr[7]);
+    return 0;
+}
 void send_temperature()
 {
 	uint8_t addr[8];
@@ -203,47 +230,50 @@ void send_temperature()
 	uint8_t present;
 	int16_t raw;
 	int i = 2;
-	while(!ds.search(addr) && i--) {
-		ds.reset_search();
-		delay(250);
-		if (!i) {
-			// Indicate that we couldn't find the thermometer
-			send_rf24_cmd(pipe_thermometer, 'T', thermometer_identification_letter, 0xFF, 0xFF);
+
+    uint8_t letter = 0;
+
+    ds.reset_search();
+    while (ds.search(addr)) {
+
+
+        letter = therm_letter_from_address(addr);
+
+        if (!letter) {
+            continue;
+        }
+
+        ds.reset();
+        ds.select(addr);
+        ds.write(0x44, 1);
+        delay(1000);
+        present = ds.reset();
+        ds.select(addr);    
+        ds.write(0xBE);
+
+        for (int i = 0; i < 9; i++) {
+            data[i] = ds.read();
+        }
+
+        if (data[8] != OneWire::crc8(data,8)) {
+            Serial.println("ERROR: CRC didn't match");
+            // Indicate that we read garbage
+            send_rf24_cmd(pipe_thermometer, 'T', letter, 0xFF, 0xFF);
             return;
-		}
-	}
+        } else {
+            raw = (data[1] << 8) | data[0];
+            byte cfg = (data[4] & 0x60);
+            // at lower res, the low bits are undefined, so let's zero them
+            if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+            else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+            else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+            //// default is 12 bit resolution, 750 ms conversion time
+            printf("%c Temperature is %d\n", letter, (int)(100.0*(float)raw/16.0));
+        }
 
-	ds.reset();
-	ds.select(addr);
-	ds.write(0x44, 1);
-	delay(1000);
-	present = ds.reset();
-	ds.select(addr);    
-	ds.write(0xBE);
-
-	for (int i = 0; i < 9; i++) {
-		data[i] = ds.read();
-	}
-
-	
-	if (data[8] != OneWire::crc8(data,8)) {
-		Serial.println("ERROR: CRC didn't match");
-		// Indicate that we read garbage
-		send_rf24_cmd(pipe_thermometer, 'T', thermometer_identification_letter, 0xFF, 0xFF);
-        return;
-	} else {
-		raw = (data[1] << 8) | data[0];
-		byte cfg = (data[4] & 0x60);
-		// at lower res, the low bits are undefined, so let's zero them
-		if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
-		else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
-		else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
-		//// default is 12 bit resolution, 750 ms conversion time
-		printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
-	}
-
-    // Simulate receiving an RF24 thermometer command, to blend in with the other, actual RF24 thermometers
-    printf("RF24 p%d 0x%x 0x%x 0x%x 0x%x\n", PIPE_THERMOMETER_ID, 'T', thermometer_identification_letter, (raw>>8) & 0xFF, raw & 0xFF);
+        // Simulate receiving an RF24 thermometer command, to blend in with the other, actual RF24 thermometers
+        printf("RF24 p%d 0x%x 0x%x 0x%x 0x%x\n", PIPE_THERMOMETER_ID, 'T', letter, (raw>>8) & 0xFF, raw & 0xFF);
+    }
 }
 
 void loop()

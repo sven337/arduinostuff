@@ -24,6 +24,7 @@ const uint64_t pipe_thermometer  = 0xF0F0F0F0F4LL;
 #define startFrame 0x02
 #define endFrame 0x03
 
+#define HAS_RF24 1
 RF24 rf24(CE_PIN, CSN_PIN);
 SoftwareSerial edfSerial(2, 6); //RX, TX (unused TX)
 char teleinfo_buf[255];
@@ -38,6 +39,9 @@ struct {
     uint8_t letter;
 } thermometer_letter_from_addr[] = {
         {{ 0x28, 0xff, 0xbd, 0xd3, 0x90, 0x15, 0x03, 0xbb }, 'P'},
+        {{ 0x28, 0x21, 0x5e, 0x79, 0xa2, 0x00, 0x03, 0xc8 }, 'B'},
+        {{ 0x28, 0x05, 0x46, 0x79, 0xa2, 0x00, 0x03, 0xe0 }, 'L'},
+        {{ 0x28, 0xd0, 0x41, 0x79, 0xa2, 0x00, 0x03, 0x9e }, 'K'},
 };
 
 char serial_cmd[255];
@@ -94,6 +98,7 @@ int send_rf24_cmd(uint64_t addr, uint8_t param0, uint8_t param1, uint8_t param2,
 	payload[2] = param2;
 	payload[3] = param3;
 
+#if HAS_RF24
 	printf("send rf24...");
 	rf24.stopListening();
 	digitalWrite(LED_YELLOW, 1);
@@ -113,6 +118,7 @@ int send_rf24_cmd(uint64_t addr, uint8_t param0, uint8_t param1, uint8_t param2,
 	}
 	rf24.startListening();
 	return ret;
+#endif
 }
 
 void setup()
@@ -121,7 +127,7 @@ void setup()
     Serial.begin(57600);
     printf("Hello\n");
     edfSerial.begin(1200); 
-
+#if HAS_RF24
 	rf24.begin();
 	rf24.powerDown();
 	rf24.setRetries(15, 15);
@@ -145,7 +151,7 @@ void setup()
 		(rf24.getChannel() != 95)*/) {
         printf("Failed to initialize radio\n");
 	}
-	
+#endif	
     pinMode(LED_YELLOW, OUTPUT);
 	pinMode(LED_RED, OUTPUT);
 	digitalWrite(LED_YELLOW, 1);
@@ -212,7 +218,7 @@ uint8_t therm_letter_from_address(uint8_t addr[8])
         }
     }
 
-    printf("Did not identify letter for thermometer addr %x %x %x %x %x %x %x %x\n", 
+    printf("Did not identify letter for thermometer addr 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x\r\n", 
             addr[0],
             addr[1],
             addr[2],
@@ -297,7 +303,9 @@ void loop()
         }
     }
 
+#if HAS_RF24
     consume_rf24();
+#endif
 
     if (millis() > send_next_temperature_at) {
         send_temperature();

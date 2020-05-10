@@ -40,9 +40,9 @@ static unsigned long last_ping_at = 0;
 int init_failed = 0;
 
 //const uint8_t thermometer_identification_letter = 'L'; // "living room"
-//const uint8_t thermometer_identification_letter = 'E'; // "exterior"
+const uint8_t thermometer_identification_letter = 'E'; // "exterior"
 //const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
-const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
+//const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
 
 ISR(WDT_vect)
 {
@@ -243,16 +243,16 @@ void loop()
 	lcd.setCursor(0,1);
 	lcd.print((float)raw/16.0);
 #endif
-	i = 100;
+	i = 3;
 
 	while (i--) {
 	    fail = radio_send('T', thermometer_identification_letter, (raw >> 8) & 0xFF, raw & 0xFF);
 		if (!fail) {
 			break;
 		}
-
-		Serial.println("radio message not sent, not sleeping");
-		delay(2000);
+        // Indicate failure to receive ACK
+        fail = radio_send('F', thermometer_identification_letter, i, 0);
+		Sleepy::loseSomeTime(2048L);
 	}
 sleep:	
 #if HAS_RF24

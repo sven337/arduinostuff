@@ -4,14 +4,14 @@
 #include "nRF24L01.h"
 #include "RF24.h"
 
+
 const int LED_DIM_PIN = 3; // [P3] "IRQ"
 const int CE_PIN = 8;
 const int CSN_PIN = 9;
-const int LDR_PIN = A0; // P1 A
+//const int LDR_PIN = A0; // P1 A
 const int THERM_PIN = A1; // P2 A
 const int DS18B20_PIN = 7; // P4 D
 #define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
-#define DIM_MAX 330.0
 
 RF24 radio(CE_PIN, CSN_PIN);
 const uint64_t pipe_address = 0xF0F0F0F0F2LL;
@@ -19,8 +19,6 @@ const uint64_t pipe_address = 0xF0F0F0F0F2LL;
 OneWire ds(DS18B20_PIN);
 
 int lamp_off = 0;
-int target_light_level = 40;
-uint8_t light_level = 150;
 uint8_t led_power = 200;
 uint8_t old_led_power = 0;
 bool thermal_override = 0;
@@ -30,68 +28,18 @@ unsigned long next_lightlevel_send_at;
 unsigned long fade_to_black_start_date;
 unsigned long next_ambient_temp_report_at;
 
-int percent_to_light_level(int pct)
-{
-	// light level goes from 4096 to 0 when pct goes from 0 to 100
-	// however, the *useful* dimming range is not 4096 to 0, so restrict it to DIM_MAX to 10
-
-	return constrain(DIM_MAX * (100 - pct) / 100.0, 10, 4096);
-}
-
 void set_led(uint8_t val)
 {
 	analogWrite(LED_DIM_PIN, val);
 	printf("Set LED to %d%%\n", val*100/255);
 }
 
-int get_light_level()
-{
-	return analogRead(LDR_PIN);
-}
-
 void radio_send_led_power(uint8_t event_type)
 {
 	if (led_power == 0 || led_power == 255 || millis() > next_lightlevel_send_at) {
 		radio_send('D', event_type, (led_power * 100 / 255), 0);
-		next_lightlevel_send_at = millis() + 1000;
+		next_lightlevel_send_at = millis() + 10000;
 	}
-}
-
-int change_light_output(int val)
-{
-	char change = 0;
-
-	int new_power = led_power + val;
-	if (new_power < 0) {
-		led_power = 0;
-	} else if (new_power > 255) {
-		led_power = 255;
-	} else {
-		led_power = new_power;
-	}
-
-	if (led_power > old_led_power) {
-		change = 'I';
-	} else if (led_power < old_led_power) {
-		change = 'D';
-	}
-
-	if (change) {
-		set_led(led_power);
-		radio_send_led_power(change);
-	}
-
-	old_led_power = led_power;
-}
-
-int increase_light_output(int val = 1)
-{
-	change_light_output(val);
-}
-
-int decrease_light_output(int val = 1)
-{
-	change_light_output(-val);
 }
 
 void strobe()
@@ -111,8 +59,7 @@ void stop_lamp()
 	lamp_off = 1;
 	printf("Lamp is now off.\n");
 	set_led(0);
-	decrease_light_output(255);
-	radio_send_light_target();
+	radio_send_led_power();
 }
 
 void fadeout()
@@ -219,12 +166,12 @@ void radio_send_temperature(uint8_t type, int temperature)
 	radio_send('T', type, temperature & 0xFF, (temperature >> 8) & 0xFF);
 }
 
-void radio_send_light_target()
+void radio_send_led_power()
 {
 	if (lamp_off) {
 		radio_send('R', 'O', 'F', 'F');
 	} else {
-		radio_send('R', '1', target_light_level & 0xFF, (target_light_level >> 8) & 0xFF);
+		radio_send('R', '1', led_power & 0xFF, (led_power >> 8) & 0xFF);
 	}
 }
 
@@ -257,11 +204,6 @@ void setup(){
 	pinMode(LED_DIM_PIN, OUTPUT);
 	set_led(led_power);
 
-	// Light level sensor
-	pinMode(LDR_PIN, INPUT);
-	digitalWrite(LDR_PIN, HIGH);
-	printf("Light level %d\n", get_light_level());
-
 	// Thermistor
 	pinMode(THERM_PIN, INPUT);
 //	digitalWrite(THERM_PIN, LOW);
@@ -269,18 +211,17 @@ void setup(){
 
 }
 
+uint8_t percent_to_led_power(uint8_t pct)
+{
+    uint16_t out = pct * 255 / 100;
+    return (uint8_t)out;
+}
+
 void loop(){
 
-	int light_level = get_light_level();
 	if (fade_to_black_start_date) {
 		fadeout();
-	} else if (!thermal_override && !lamp_off) {
-		if (light_level > target_light_level + 5) {
-			increase_light_output();
-		} else if (light_level < target_light_level - 5) {
-			decrease_light_output();
-		}
-	} 
+	}
 
 	if (millis() > next_temperature_check_at) {
 		int temp = get_temperature();
@@ -289,12 +230,12 @@ void loop(){
 			printf("Thermal emergency, temp %d.", temp);
 			radio_send_temperature('E', temp);
 			thermal_override = 1;
-			decrease_light_output(255);
+            set_led(0);
 		} else if (temp > 6000) {// 60 C 
 			printf("Thermal alarm, temp %d.", temp);
 			radio_send_temperature('A', temp);
 			thermal_override = 1;
-			decrease_light_output(25);
+            set_led(0);
 			next_temperature_check_at = millis() + 5000;
 		} else if (thermal_override && temp < 5500) {
 			radio_send_temperature('0', temp);
@@ -319,18 +260,8 @@ void loop(){
 					stop_lamp();
 				} else {
 					lamp_off = 0;
-					target_light_level = percent_to_light_level(payload[1]);
-					printf("Set target light level %d\n", target_light_level);
-					radio_send_light_target();
-				}
-				break;
-			case 'Q':
-				{
-				int light_level = get_light_level();
-				radio_send_temperature('N', get_temperature());
-				radio_send_light_target();
-				radio_send('L', 'N', light_level & 0xFF, (light_level >> 8) & 0xFF);
-				radio_send_led_power('N');
+                    set_led(percent_to_led_power(payload[1]));
+					radio_send_led_power();
 				}
 				break;
 			case 'F':

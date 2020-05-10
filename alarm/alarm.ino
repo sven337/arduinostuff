@@ -9,6 +9,8 @@
 
 #include "wifi_params.h"
 
+#define ARR_SZ(X) sizeof(X)/sizeof(X[0])
+
 ESP8266WebServer websrv (80);
 WiFiUDP udp;
 const int udp_port = 2222;
@@ -22,6 +24,27 @@ const int udp_port = 2222;
   We have : R=Ur.Rk/(E-Ur)
   **/
 
+enum detector_status {
+    OPENCIRCUIT = 0,
+    NORMAL = 1,
+    ALARM = 2,
+    CLOSEDCIRCUIT = 3,
+    UNKNOWN = 4,
+};
+
+struct {
+    const char *name;
+    enum detector_status status;
+    enum detector_status oldstatus;
+} sensors[] = {{ "smoke", UNKNOWN, UNKNOWN }};
+
+const char *status_str[] = { [0] = "opencircuit", 
+                             [1] = "normal",
+                             [2] = "ALARM",
+                             [3] = "closedcircuit",
+                             [4] = "UNKNOWN" };
+
+unsigned long int send_fullstatus_at = 5000;
 
 /*  MCP3201 ADC Hardware:
       MCP3201 Pin   ---------------- ESP8266 Pin
@@ -87,20 +110,22 @@ void spiBegin(void)
 }
 
 static void handleRoot() {
-	char temp[1024];
+	char temp[4096];
 	int sec = millis() / 1000;
 	int min = sec / 60;
 	int hr = min / 60;
 
-	snprintf ( temp, 1024,
+	snprintf(temp, 1024,"<html><head><title>Alarm control</title></head><body>\
+    <h1>Alarm control</h1>\
+    <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d</p><br/><br/>"\
+    "<table><thead><tr><th>Sensor</th><th>Status</th></tr></thead><tbody>",
+		__DATE__, __TIME__, hr, min % 60, sec % 60);
 
-"<html><head><title>Alarm control</title></head><body>\
-    <h1>Hello from alarm control!</h1>\
-    <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d = %d ms</p>\
-  </body></html>",
-
-		__DATE__, __TIME__, hr, min % 60, sec % 60, (int)millis()
-	);
+    int i;
+    for (i = 0; i < sizeof(sensors)/sizeof(sensors[0]); i++) {
+        sprintf(temp+strlen(temp), "<tr><td>%s</td><td>%s</td></tr>", sensors[i].name, status_str[sensors[i].status]);
+    }
+    strcat(temp, "</tbody></table></body></html>");
 	websrv.send ( 200, "text/html", temp );
 }
 
@@ -216,27 +241,42 @@ uint32_t measure_resistance(uint8_t input_index)
     return R;
 }
 
-enum detector_status {
-    OPENCIRCUIT = 0,
-    NORMAL = 1,
-    ALARM = 2,
-    CLOSEDCIRCUIT = 3,
-}
-
 enum detector_status status_from_res(uint32_t res)
 {
-    if (res > 1800 && res < 5000) {
-        return NORMAL;
-    } else if (res > 800 && res < 1200) {
+    if (res > 1600 && res < 5000) {
         return ALARM;
-    } 
-    if (res < 800) {
+    } else if (res > 800 && res < 1200) {
+        return NORMAL;
+    } else if (res < 800) {
         return CLOSEDCIRCUIT;
-    } 
-    if (res > 5000) {
+    } else if (res > 5000) {
         return OPENCIRCUIT;
     }
 
+    return UNKNOWN;
+}
+
+void send_sensor_update(uint8_t idx)
+{
+    HTTPClient http;
+    char URI[200];
+
+    sprintf(URI, "http://192.168.1.6:5000/update/alarm/%s/%s", sensors[idx].name, status_str[sensors[idx].status]);
+    Serial.print("[HTTP] begin...\n");
+    Serial.print(URI);
+
+    http.begin(URI);
+
+    Serial.print("[HTTP] GET...\n");
+    int httpCode = http.GET();
+
+    // httpCode will be negative on error
+    if(httpCode) {
+        // HTTP header has been send and Server response header has been handled
+        Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+    }
+
+    http.end();
 }
 
 void loop ( void ) {
@@ -255,18 +295,28 @@ void loop ( void ) {
 		parse_cmd(&packetBuffer[0]);
 	}
 
-    uint32_t res = measure_resistance(0);
-    printf("res %d ohm\r\n", res);
-/*	
-	if (millis() > send_temperature_at) {
-		send_temperature_at = millis() + 5L * 60L * 1000L;
+    int i;
+    for (i = 0; i < ARR_SZ(sensors); i++) {
+        uint32_t res = measure_resistance(i);
+        sensors[i].status = status_from_res(res);
+        if (sensors[i].status != sensors[i].oldstatus) {
+            // Report modified status
+            // XXX
+            printf("Sensor %d changed status from %s to %s res %d\r\n", i, status_str[sensors[i].oldstatus], status_str[sensors[i].status], res);
+            sensors[i].oldstatus = sensors[i].status;
+            send_sensor_update(i);
+        }
+    }
+
+	if (millis() > send_fullstatus_at) {
+		send_fullstatus_at = millis() + 5L * 60L * 1000L; // 5 minutes
+
+        // Report full status
+        for (i = 0; i < ARR_SZ(sensors); i++) {
+            send_sensor_update(i);
+        }
 	
-		// Call my server to check if we need to deep sleep or not. This is used to enable OTAs from my desk. :)
-		if (must_do_deep_sleep()) {
-			Serial.println("deepsleep go");	
-			ESP.deepSleep(5000*60000L); 
-		}
-	}*/
+	}
    
-	delay(250);
+	delay(500);
 }

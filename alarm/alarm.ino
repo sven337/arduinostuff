@@ -36,7 +36,20 @@ struct {
     const char *name;
     enum detector_status status;
     enum detector_status oldstatus;
-} sensors[] = {{ "smoke", UNKNOWN, UNKNOWN }};
+} sensors[] = {
+               { "garage", UNKNOWN, UNKNOWN }, 
+               { "sdb", UNKNOWN, UNKNOWN }, 
+               { "chfond", UNKNOWN, UNKNOWN }, 
+               { "chmilieu", UNKNOWN, UNKNOWN }, 
+               { "bureau", UNKNOWN, UNKNOWN }, 
+               { "maindoor", UNKNOWN, UNKNOWN }, 
+               { "baievitreeG", UNKNOWN, UNKNOWN }, 
+               { "baievitreeD", UNKNOWN, UNKNOWN }, 
+               { "fenetre_sejour", UNKNOWN, UNKNOWN }, 
+               { "cuisine", UNKNOWN, UNKNOWN }, 
+               { "smoke", UNKNOWN, UNKNOWN }, 
+               { "carbonmonox", UNKNOWN, UNKNOWN }, 
+              };
 
 const char *status_str[] = { [0] = "opencircuit", 
                              [1] = "normal",
@@ -181,6 +194,13 @@ void setup ( void ) {
 	ArduinoOTA.setHostname("alarm-control");
 	ArduinoOTA.begin();
 
+    // Selection bits for CD74HC4067 multiplexer
+    pinMode(D0, OUTPUT);
+    pinMode(D1, OUTPUT);
+    pinMode(D2, OUTPUT);
+    pinMode(D3, OUTPUT);
+
+
     spiBegin();
 }
 
@@ -198,39 +218,20 @@ static void parse_cmd(const char *buf)
 	} 
 }
 
-bool must_do_deep_sleep()
-{
-	HTTPClient http;
-	char URI[150];
-
-	sprintf(URI, "http://192.168.0.6:5000/deep_sleep_mode/");
-	http.begin(URI); 
-
-	int httpCode = http.GET();
-
-	if (httpCode == HTTP_CODE_OK) {
-		// HTTP header has been send and Server response header has been handled
-		Serial.printf("[HTTP] GET... code: %d\n", httpCode);
-		String payload = http.getString();
-		Serial.println(payload);
-
-		if (payload.startsWith("1")) {
-			return true;
-		} else {
-			return false;
-		}
-	} else {
-		return false;
-	}
-
-	http.end();
-}
-
 uint32_t measure_resistance(uint8_t input_index)
 {
     const float E = 3.3;
     const float Rk = 1000;
-    // Ignore input_index until I receive the multiplexer
+
+    int d0val = input_index & 0x1; 
+    int d1val = (input_index >> 1) & 0x1;
+    int d2val = (input_index >> 2) & 0x1;
+    int d3val = (input_index >> 3) & 0x1;
+    digitalWrite(D0, d0val);
+    digitalWrite(D1, d1val);
+    digitalWrite(D2, d2val);
+    digitalWrite(D3, d3val);
+    delay(1);
 
     uint16_t adcval = transfer16(); // linear 0-4096 for 0V-3.3V
     float Ur = (adcval * 3.3) / 4096.0;

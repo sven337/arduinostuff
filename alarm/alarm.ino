@@ -1,19 +1,14 @@
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
-#include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
 #include <ESP8266HTTPClient.h>
 #include <SPI.h>
+#include "Adafruit_MQTT.h"
+#include "Adafruit_MQTT_Client.h"
 
 #include "wifi_params.h"
-
-#define ARR_SZ(X) sizeof(X)/sizeof(X[0])
-
-ESP8266WebServer websrv (80);
-WiFiUDP udp;
-const int udp_port = 2222;
 
 /** Surveillance de détecteurs d'ouverture d'alarme + détecteur de fumée et de CO.
   Les détecteurs d'ouverture étaient cablés sur une Honeywell Galaxy 48 qui est tombée en panne. Ils sont connectés avec des résistances de telle sorte que (normally) closed = 1kohm , open = 2kohm.
@@ -23,6 +18,14 @@ const int udp_port = 2222;
   Let E = 3.3V, Rk = 1kOhm, R is the resistance we're looking for, Ur is the voltage across it = the voltage measured by the ADC.
   We have : R=Ur.Rk/(E-Ur)
   **/
+
+
+#define ARR_SZ(X) sizeof(X)/sizeof(X[0])
+
+ESP8266WebServer websrv(80);
+
+WiFiClient client;
+Adafruit_MQTT_Client mqtt(&client, "192.168.1.6", 1883, "none");
 
 enum detector_status {
     OPENCIRCUIT = 0,
@@ -53,9 +56,9 @@ struct {
 
 const char *status_str[] = { [0] = "opencircuit", 
                              [1] = "normal",
-                             [2] = "ALARM",
+                             [2] = "alarm",
                              [3] = "closedcircuit",
-                             [4] = "UNKNOWN" };
+                             [4] = "unknown" };
 
 unsigned long int send_fullstatus_at = 5000;
 
@@ -76,7 +79,11 @@ static inline void setDataBits(uint16_t bits) {
     SPI1U1 = ((SPI1U1 & mask) | ((bits << SPILMOSI) | (bits << SPILMISO)));
 }
 
+#ifndef ICACHE_RAM_ATTR
+#warning "Should have ICACHE_RAM_ATTR"
 #define ICACHE_RAM_ATTR     __attribute__((section(".iram.text")))
+#endif
+
 /* SPI code based on the SPI library */
 static inline ICACHE_RAM_ATTR uint16_t transfer16(void) {
 	union {
@@ -122,24 +129,25 @@ void spiBegin(void)
   setDataBits(16);
 }
 
+
+char tempBuf[4096];
 static void handleRoot() {
-	char temp[4096];
 	int sec = millis() / 1000;
 	int min = sec / 60;
 	int hr = min / 60;
 
-	snprintf(temp, 1024,"<html><head><title>Alarm control</title></head><body>\
+	snprintf(tempBuf, 1024,"<html><head><title>Alarm control</title></head><body>\
     <h1>Alarm control</h1>\
     <p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d</p><br/><br/>"\
     "<table><thead><tr><th>Sensor</th><th>Status</th></tr></thead><tbody>",
 		__DATE__, __TIME__, hr, min % 60, sec % 60);
 
-    int i;
+    unsigned int i;
     for (i = 0; i < sizeof(sensors)/sizeof(sensors[0]); i++) {
-        sprintf(temp+strlen(temp), "<tr><td>%s</td><td>%s</td></tr>", sensors[i].name, status_str[sensors[i].status]);
+        sprintf(tempBuf+strlen(tempBuf), "<tr><td>%s</td><td>%s</td></tr>", sensors[i].name, status_str[sensors[i].status]);
     }
-    strcat(temp, "</tbody></table></body></html>");
-	websrv.send ( 200, "text/html", temp );
+    strcat(tempBuf, "</tbody></table></body></html>");
+	websrv.send(200, "text/html", tempBuf);
 }
 
 void ota_onstart(void)
@@ -183,7 +191,6 @@ void setup ( void ) {
 	Serial.print ( "IP " );
 	Serial.println ( WiFi.localIP() );
 
-	udp.begin(udp_port);
 	websrv.on ( "/", handleRoot );
 
 	websrv.begin();
@@ -204,20 +211,6 @@ void setup ( void ) {
     spiBegin();
 }
 
-void udp_send(const char *str)
-{
-	udp.beginPacket(udp.remoteIP(), udp.remotePort());
-	udp.write(str);
-	udp.endPacket();
-}
-
-static void parse_cmd(const char *buf)
-{
-	if (!strncmp(buf, "STATUS", 6)) {
-		//udp_send_status_report();
-	} 
-}
-
 uint32_t measure_resistance(uint8_t input_index)
 {
     const float E = 3.3;
@@ -231,7 +224,7 @@ uint32_t measure_resistance(uint8_t input_index)
     digitalWrite(D1, d1val);
     digitalWrite(D2, d2val);
     digitalWrite(D3, d3val);
-    delay(1);
+    delay(10);
 
     uint16_t adcval = transfer16(); // linear 0-4096 for 0V-3.3V
     float Ur = (adcval * 3.3) / 4096.0;
@@ -246,7 +239,7 @@ enum detector_status status_from_res(uint32_t res)
 {
     if (res > 1600 && res < 5000) {
         return ALARM;
-    } else if (res > 800 && res < 1200) {
+    } else if (res > 800 && res < 1300) {
         return NORMAL;
     } else if (res < 800) {
         return CLOSEDCIRCUIT;
@@ -259,16 +252,15 @@ enum detector_status status_from_res(uint32_t res)
 
 void send_sensor_update(uint8_t idx)
 {
+    // HTTP
     HTTPClient http;
     char URI[200];
 
     sprintf(URI, "http://192.168.1.6:5000/update/alarm/%s/%s", sensors[idx].name, status_str[sensors[idx].status]);
-    Serial.print("[HTTP] begin...\n");
     Serial.print(URI);
 
     http.begin(URI);
 
-    Serial.print("[HTTP] GET...\n");
     int httpCode = http.GET();
 
     // httpCode will be negative on error
@@ -278,23 +270,24 @@ void send_sensor_update(uint8_t idx)
     }
 
     http.end();
+
+    // MQTT
+    if (!mqtt.connected()) {
+        Serial.print("Connecting MQTT...");
+        mqtt.connect();
+        Serial.println("done");
+    }
+    if (!mqtt.connected()) {
+        // Ouch
+        return;
+    }
+    sprintf(URI, "alarm/%s", sensors[idx].name);
+    mqtt.publish(URI, status_str[sensors[idx].status], 1);
 }
 
 void loop ( void ) {
 	ArduinoOTA.handle();
 	websrv.handleClient();
-
-	char packetBuffer[255];
-	int packetSize = udp.parsePacket();
-	if (packetSize) {
-		// read the packet into packetBufffer
-		int len = udp.read(packetBuffer, 255);
-		if (len > 0) {
-			packetBuffer[len] = 0;
-		}
-
-		parse_cmd(&packetBuffer[0]);
-	}
 
     int i;
     for (i = 0; i < ARR_SZ(sensors); i++) {
@@ -309,15 +302,15 @@ void loop ( void ) {
         }
     }
 
-	if (millis() > send_fullstatus_at) {
-		send_fullstatus_at = millis() + 5L * 60L * 1000L; // 5 minutes
+/*	if (millis() > send_fullstatus_at) {
+		send_fullstatus_at = millis() + 15L * 60L * 1000L; // 15 minutes
 
         // Report full status
         for (i = 0; i < ARR_SZ(sensors); i++) {
             send_sensor_update(i);
         }
 	
-	}
+	}*/
    
 	delay(500);
 }

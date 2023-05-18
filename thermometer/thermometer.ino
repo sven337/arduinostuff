@@ -39,8 +39,9 @@ static unsigned long last_ping_at = 0;
 
 int init_failed = 0;
 
-//const uint8_t thermometer_identification_letter = 'L'; // "living room"
-const uint8_t thermometer_identification_letter = 'E'; // "exterior"
+const uint8_t thermometer_identification_letter = 'L'; // "living room"
+//const uint8_t thermometer_identification_letter = 'E'; // "exterior"
+//const uint8_t thermometer_identification_letter = 'P'; // "pool"
 //const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
 //const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
 
@@ -106,7 +107,7 @@ void setup(){
 	radio.begin();
 	radio.powerDown();
 	radio.setRetries(15, 15);
-	radio.setChannel(95);
+	radio.setChannel(80);
 	radio.setCRCLength(RF24_CRC_16);
 	radio.setPayloadSize(sizeof(unsigned long));
 	radio.setPALevel(RF24_PA_MAX);

@@ -9,6 +9,7 @@
 #include "Adafruit_MQTT_Client.h"
 
 #include "wifi_params.h"
+#include "mqtt_login.h"
 
 /** Surveillance de détecteurs d'ouverture d'alarme + détecteur de fumée et de CO.
   Les détecteurs d'ouverture étaient cablés sur une Honeywell Galaxy 48 qui est tombée en panne. Ils sont connectés avec des résistances de telle sorte que (normally) closed = 1kohm , open = 2kohm.
@@ -25,7 +26,7 @@
 ESP8266WebServer websrv(80);
 
 WiFiClient client;
-Adafruit_MQTT_Client mqtt(&client, "192.168.1.6", 1883, "none");
+Adafruit_MQTT_Client mqtt(&client, "192.168.1.6", 1883, MQTT_USER, MQTT_PASS);
 
 enum detector_status {
     OPENCIRCUIT = 0,

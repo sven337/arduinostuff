@@ -1,194 +1,110 @@
 #include <SPI.h>
+#include <JeeLib.h>
 #include <OneWire.h>
+#include <avr/sleep.h>
+#include <util/atomic.h>
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
 
+#define HAS_SOLAR_PANEL 0
+#define HAS_RF24 1
+#define HAS_LCD 0
 
-const int LED_DIM_PIN = 3; // [P3] "IRQ"
+#if HAS_LCD
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C	lcd(0x27,2,1,0,4,5,6,7); // 0x27 is the I2C bus address for an unmodified backpack
+#endif
+
+const int SCL_PIN = A5;
+const int SDA_PIN = A4;
 const int CE_PIN = 8;
-const int CSN_PIN = 9;
-//const int LDR_PIN = A0; // P1 A
-const int THERM_PIN = A1; // P2 A
-const int DS18B20_PIN = 7; // P4 D
-#define ARRAY_SZ(X) (sizeof(X)/sizeof(X[0]))
-
-RF24 radio(CE_PIN, CSN_PIN);
-const uint64_t pipe_address = 0xF0F0F0F0F2LL;
+const int CSN_PIN = 9; //on this board it's different from my other thermometers, and not trivial to fix
+const int BATTERY_PIN = A2;
+const int SOLAR_PIN = A0;
+const int SOLAR_RESISTOR_PIN = A1;
+const int LED_YELLOW = 5;
+const int LED_RED = 4;
+const int DS18B20_PIN = 7;
 
 OneWire ds(DS18B20_PIN);
 
-int lamp_off = 0;
-uint8_t led_power = 200;
-uint8_t old_led_power = 0;
-bool thermal_override = 0;
+#if HAS_RF24
+RF24 radio(CE_PIN, CSN_PIN);
+const uint64_t pipe_address = 0xF0F0F0F0F4LL;
+#endif
 
-unsigned long next_temperature_check_at;
-unsigned long next_lightlevel_send_at;
-unsigned long fade_to_black_start_date;
-unsigned long next_ambient_temp_report_at;
+int init_failed = 0;
 
-void set_led(uint8_t val)
+//const uint8_t thermometer_identification_letter = 'L'; // "living room"
+//const uint8_t thermometer_identification_letter = 'E'; // "exterior"
+const uint8_t thermometer_identification_letter = 'P'; // "pool"
+//const uint8_t thermometer_identification_letter = 'B'; // "bedroom"
+//const uint8_t thermometer_identification_letter = 'K'; // "kid's bedroom"
+
+ISR(WDT_vect)
 {
-	analogWrite(LED_DIM_PIN, val);
-	printf("Set LED to %d%%\n", val*100/255);
+	Sleepy::watchdogEvent();
 }
 
-void radio_send_led_power(uint8_t event_type)
+int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
-	if (led_power == 0 || led_power == 255 || millis() > next_lightlevel_send_at) {
-		radio_send('D', event_type, (led_power * 100 / 255), 0);
-		next_lightlevel_send_at = millis() + 10000;
-	}
-}
-
-void strobe()
-{
-	int i = 5;
-
-	while (i--) {
-		set_led(0);
-		delay(30);
-		set_led(led_power);
-		delay(30);
-	}
-}
-
-void stop_lamp()
-{
-	lamp_off = 1;
-	printf("Lamp is now off.\n");
-	set_led(0);
-	radio_send_led_power();
-}
-
-void fadeout()
-{
-	if (millis() >= fade_to_black_start_date + 15000) {
-		stop_lamp();
-		fade_to_black_start_date = 0;
-		return;
-	}
-	
-	unsigned long remaining = fade_to_black_start_date + 15000 - millis();
-	if (remaining < 10000) {
-		set_led(led_power * remaining / 10000);
-	}
-}
-
-int get_temperature()
-{
-	// Integrated pullup has R1 = 20k
-	// We have Uth = Rth * E / (R1 + Rth)
-    // let V = Uth * 1023 / E value read by the ADC
-    // <=> V = 1023 * Rth / (R1 + Rth)
-	// solve in Rth :
-    // Rth 	=  R1 * V / (1023 - V)
-
-	// Once we have Rth, use beta parameter equation for NTC:
-	// T = Beta / ln (Rth / R0 * exp(-Beta/T0))
-
-	unsigned int adc = analogRead(THERM_PIN);
-	const unsigned long int R1 = 21900;
-	const float Beta = 4400.0;
-	const float Beta_R0 = 100000.0;
-	const float Beta_T0 = 25.0+273.0;
-	float Rth = R1 * adc / (float)(1023 - adc);
-
-	float T = Beta / log(Rth / (Beta_R0 * exp(-Beta / Beta_T0))) - 273.0;
-//	printf("adc is %d, R1*adc is %ld, Rth is %lu, temp is %u\n", adc, R1*adc, (long unsigned int)Rth, (int)(T * 100.0));
-	
-	return (int)(T * 100.0);
-}
-
-int get_ambient_temperature()
-{
-	uint8_t addr[8];
-	uint8_t data[12];
-	int i = 4;
-	while(!ds.search(addr) && i--) {
-		Serial.println("No more addresses.");
-		ds.reset_search();
-		delay(250);
-	}
-    if (!i) {
-		return 0;
-	}
-
-	ds.reset();
-	ds.select(addr);
-	ds.write(0x44, 1);
-	delay(800);
-	uint8_t present = ds.reset();
-	ds.select(addr);    
-	ds.write(0xBE);
-
-	Serial.print("  Data = ");
-	Serial.print(present, HEX);
-	Serial.print(" ");
-	for (int i = 0; i < 9; i++) {
-		data[i] = ds.read();
-		Serial.print(data[i], HEX);
-		Serial.print(" ");
-	}
-	Serial.println();
-
-	// Convert the data to actual temperature
-	// because the result is a 16 bit signed integer, it should
-	// be stored to an "int16_t" type, which is always 16 bits
-	// even when compiled on a 32 bit processor.
-	int16_t raw = (data[1] << 8) | data[0];
-    byte cfg = (data[4] & 0x60);
-    // at lower res, the low bits are undefined, so let's zero them
-    if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
-    else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
-    else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
-    //// default is 12 bit resolution, 750 ms conversion time
-	printf("ambient Temperature is %d\n", (int)(100.0*raw/16.0));
-
-	return (int)(((float)raw/16.0) * 100.0);
-}
-
-void radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
-{
+#if HAS_RF24
 	uint8_t payload[4] = { p0, p1, p2, p3 };
-	radio.stopListening();
+	digitalWrite(LED_YELLOW, 1);
+	delayMicroseconds(5000);
 	bool ok = radio.write(payload, 4);
 	if (ok) 
 		Serial.println("send ok");
 	else
 		Serial.println("send KO");
-	radio.startListening();
-}
+	
+	digitalWrite(LED_YELLOW, 0);
 
-void radio_send_temperature(uint8_t type, int temperature)
-{
-	radio_send('T', type, temperature & 0xFF, (temperature >> 8) & 0xFF);
-}
-
-void radio_send_led_power()
-{
-	if (lamp_off) {
-		radio_send('R', 'O', 'F', 'F');
-	} else {
-		radio_send('R', '1', led_power & 0xFF, (led_power >> 8) & 0xFF);
+	if (!ok) {
+		digitalWrite(LED_RED, 1);
+		return -1;
 	}
+	digitalWrite(LED_RED, 0);
+#endif
+	return 0;
 }
 
-void radio_send_ambient(uint16_t deg)
+
+int radio_send_bat(uint16_t bat)
 {
-	radio_send('A', 'N', (deg >> 8) & 0xFF, deg & 0xFF);
-} 
+	return radio_send('B', thermometer_identification_letter, (bat >> 8) & 0xFF, bat & 0xFF);
+}
+
+int radio_send_panel(uint16_t panel_voltage)
+{
+	return radio_send('S', thermometer_identification_letter, (panel_voltage >> 8) & 0xFF, panel_voltage & 0xFF);
+}
+
+int radio_send_current(uint16_t panel_voltage, uint16_t panel_resistor_voltage)
+{
+	// Panel -(-> SOLAR_PIN) - resistor (-> SOLAR_RESISTOR_PIN) - circuit
+	// So the current is the voltage across the resistor, which is panel_voltage - panel_resistor_voltage
+	// It's not supposed to be negative but I've observed -1 in some cases, so make the difference signed.
+	int16_t value = panel_voltage - panel_resistor_voltage;
+
+	// Resistor is set to 22 ohm
+	// U = R.I so I = U / 22, send it *1000 to see something
+	value = 1000 * (value  * 3.3f / 1024) / 22;
+	return radio_send('C', thermometer_identification_letter, (value >> 8) & 0xFF, value & 0xFF);
+}
 
 void setup(){
 	printf_begin();
 	Serial.begin(57600);
 
+#if HAS_RF24
 	// Radio init
 	radio.begin();
 	radio.powerDown();
 	radio.setRetries(15, 15);
-	radio.setChannel(95);
+	radio.setChannel(80);
 	radio.setCRCLength(RF24_CRC_16);
 	radio.setPayloadSize(sizeof(unsigned long));
 	radio.setPALevel(RF24_PA_MAX);
@@ -196,80 +112,170 @@ void setup(){
  	radio.setAutoAck(true);
 	radio.openWritingPipe(pipe_address);
 	radio.openReadingPipe(1, pipe_address);
-	radio.startListening();
 
 	radio.printDetails();
 
-	// Start LED 
-	pinMode(LED_DIM_PIN, OUTPUT);
-	set_led(led_power);
+	if ((radio.getDataRate() != RF24_250KBPS) ||
+		(radio.getCRCLength() != RF24_CRC_16) /*|| 
+		(radio.getChannel() != 95)*/) {
+		// failed to initialize radio
+		init_failed = 1;
+	}
+#endif
 
-	// Thermistor
-	pinMode(THERM_PIN, INPUT);
-//	digitalWrite(THERM_PIN, LOW);
-	printf("thermistor Temperature is %d\n", get_temperature());
+#if HAS_LCD
+	lcd.begin (16,2); // for 16 x 2 LCD module
+	lcd.setBacklightPin(3,POSITIVE);
+	lcd.setBacklight(HIGH);
+	lcd.home();
+	lcd.print("Hello");
+#endif
 
+	pinMode(LED_YELLOW, OUTPUT);
+	pinMode(LED_RED, OUTPUT);
+	digitalWrite(LED_YELLOW, 1);
+	digitalWrite(LED_RED, 1);
+	delay(100);
+	digitalWrite(LED_RED, 0);
+	delay(100);
+	digitalWrite(LED_RED, 1);
+	delay(100);
+	digitalWrite(LED_RED, 0);
+	delay(100);
+	digitalWrite(LED_RED, 1);
+	delay(100);
+	digitalWrite(LED_RED, 0);
+	digitalWrite(LED_YELLOW, 0);
+
+#if HAS_RF24
+	radio.powerDown();
+#endif
 }
 
-uint8_t percent_to_led_power(uint8_t pct)
+float battery_voltage(uint16_t battery_level)
 {
-    uint16_t out = pct * 255 / 100;
-    return (uint8_t)out;
+	float lvl = (float)battery_level * 3.3 / 65536.0;
+	return lvl;
 }
 
-void loop(){
-
-	if (fade_to_black_start_date) {
-		fadeout();
+void loop() 
+{
+	int red = 0;
+	while (init_failed) {
+			digitalWrite(LED_RED, red);
+			red = !red;
+			// Christmas tree if init failed
+			digitalWrite(LED_YELLOW, 1);
+			delay(50);
+			digitalWrite(LED_YELLOW, 0);
+			delay(50);
+			digitalWrite(LED_YELLOW, 1);
+			delay(50);
+			digitalWrite(LED_YELLOW, 0);
+			delay(50);
 	}
 
-	if (millis() > next_temperature_check_at) {
-		int temp = get_temperature();
-		next_temperature_check_at = millis() + 30000;
-		if (temp > 8000) {
-			printf("Thermal emergency, temp %d.", temp);
-			radio_send_temperature('E', temp);
-			thermal_override = 1;
-            set_led(0);
-		} else if (temp > 6000) {// 60 C 
-			printf("Thermal alarm, temp %d.", temp);
-			radio_send_temperature('A', temp);
-			thermal_override = 1;
-            set_led(0);
-			next_temperature_check_at = millis() + 5000;
-		} else if (thermal_override && temp < 5500) {
-			radio_send_temperature('0', temp);
-			printf("End thermal alarm.");
-			thermal_override = 0;
+	uint16_t battery_level = analogRead(BATTERY_PIN);
+#if HAS_SOLAR_PANEL
+	uint16_t panel_voltage = analogRead(SOLAR_PIN);
+	uint16_t resistor_voltage = analogRead(SOLAR_RESISTOR_PIN);
+#endif
+
+	uint8_t addr[8];
+	uint8_t data[12];
+	uint8_t present;
+	int16_t raw;
+	int i = 5;
+	while(!ds.search(addr) && i--) {
+		Serial.println("No more addresses.");
+		ds.reset_search();
+		delay(250);
+		if (!i) {
+            raw = 0xFFFF;
+			goto endOneWire;
 		}
 	}
 
-	if (millis() > next_ambient_temp_report_at) {
-		int deg = get_ambient_temperature();
-		printf("Ambient temp %d\n", deg);
-		radio_send_ambient(deg);
-		next_ambient_temp_report_at = millis() + 15L * 60L * 1000L;
+	ds.reset();
+	ds.select(addr);
+	ds.write(0x44, 1);
+	delay(1000);
+	present = ds.reset();
+	ds.select(addr);    
+	ds.write(0xBE);
+
+	for (int i = 0; i < 9; i++) {
+		data[i] = ds.read();
 	}
 
-	while (radio.available()) {
-		uint8_t payload[4];
-		radio.read(payload, 4);
-		switch (payload[0]) {
-			case 'L':
-				if (payload[1] == 0) {
-					stop_lamp();
-				} else {
-					lamp_off = 0;
-                    set_led(percent_to_led_power(payload[1]));
-					radio_send_led_power();
-				}
-				break;
-			case 'F':
-				printf("Fading out to black...\n");
-				fade_to_black_start_date = millis();
-				// Notify user that we're shutting down with a brief strobe
-				strobe();
-				break;
+	
+	if (data[8] != OneWire::crc8(data,8)) {
+		Serial.println("ERROR: CRC didn't match");
+		// Take note that we read garbage
+        raw = 0xFFFF;
+	} else {
+		raw = (data[1] << 8) | data[0];
+		byte cfg = (data[4] & 0x60);
+		// at lower res, the low bits are undefined, so let's zero them
+		if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+		else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+		else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+		//// default is 12 bit resolution, 750 ms conversion time
+		printf("Temperature is %d\n", (int)(100.0*(float)raw/16.0));
+	}
+
+endOneWire:
+#if HAS_LCD
+	lcd.home();
+	lcd.print("Temperature");
+	lcd.setCursor(0,1);
+	lcd.print((float)raw/16.0);
+#endif
+
+#if HAS_RF24
+	radio.powerUp();
+#endif
+
+	bool fail = radio_send_bat(battery_level);
+#if HAS_SOLAR_PANEL
+	fail |= radio_send_panel(panel_voltage);
+	fail |= radio_send_current(panel_voltage, resistor_voltage);
+#endif
+
+	i = 3;
+	while (i--) {
+	    fail = radio_send('T', thermometer_identification_letter, (raw >> 8) & 0xFF, raw & 0xFF);
+		if (!fail) {
+			break;
+		}
+        // Indicate failure to receive ACK
+        radio_send('F', thermometer_identification_letter, i, 0);
+		Sleepy::loseSomeTime(2048L);
+	}
+sleep:	
+#if HAS_RF24
+	radio.powerDown();
+#endif
+	Serial.println("going to sleep now");
+	Serial.flush();
+
+	Sleepy::loseSomeTime(32768L);
+
+    // Do not deep sleep if sending failed, instead sleep for 10 seconds
+    if (fail) {
+        delay(10000);
+        return;
+    }
+
+	for (int i = 1; i < 15L*60L*1000L / 32768L; i++) {
+#if HAS_SOLAR_PANEL
+		if (battery_voltage(battery_level) >= 1.4f) {
+			// Battery is overcharged, try to waste energy!
+			delay(10000);
+		}
+#endif
+		if (!Sleepy::loseSomeTime(32768L)) {
+			Serial.println("woken up by intr");
 		}
 	}
 }

@@ -32,6 +32,11 @@ SoftwareSerial edfSerial(2, 6); //RX, TX (unused TX)
 char teleinfo_buf[255];
 int teleinfo_cur = 0;
 
+int8_t frame_bigskip_counter; // how many more frames to skip (for unimportant fields)
+int8_t frame_smallskip_counter; // how many more frames to skip (for important fields)
+
+#define BIGSKIP_INTERVAL 30 // count 30 full frames (approx 1 min)
+#define SMALLSKIP_INTERVAL 3 
 /*
 DEMAIN ---- "
 ADCO 000000000000 J
@@ -72,28 +77,30 @@ MOTDETAT 000000 B
 */
 void send_line()
 {
-    // We have four bytes to fit a lot of data. Build this intelligently
-    struct {
-        const char *name;
-        uint8_t frame_type;
+    // We have four bytes on the air to fit the data. Build packets intelligently.
+    const struct {
+        const char     *name; // name of frame
+        uint8_t   frame_type; // one-character code for frame, 0 if ignored
+        uint8_t   pos_offset; // offset to the data value to send over the air
+        bool   use_smallskip; // use big or small skip counter?
     } mapping[] = {
-            { "ADCO",     0 }, //000000000000 J
-            { "OPTARIF",  0 }, //BBR( S
-            { "ISOUSC",   0 }, //30 9
-            { "BBRHCJB", 'b'}, //033487837 H
-            { "BBRHPJB", 'B'}, //006345478 O
-            { "BBRHCJW", 'w'}, //000000000 2
-            { "BBRHPJW", 'W'}, //000000000 ?
-            { "BBRHCJR", 'r'},  //000000000 -
-            { "BBRHPJR", 'R'}, //000000000 :
-            { "PTEC",    'J'}, //HPJB P
-            { "DEMAIN",  'D'}, //---- "
-            { "IINST",   'I'}, //003 Z
-            { "ADPS",    'A'},
-            { "IMAX",     0 }, //090 H
-            { "PAPP",    'P'}, //00000 !
-            { "HHPHC",    0 }, //A ,
-            { "MOTDETAT", 0 }, //000000 B
+/*          { "ADCO",     0 , 0, 0}, //000000000000 J
+            { "OPTARIF",  0 , 0, 0}, //BBR( S
+            { "ISOUSC",   0 , 0, 0}, //30 9 */
+            { "BBRHCJB", 'b', 0, 0}, //033487837 H
+            { "BBRHPJB", 'B', 0, 0}, //006345478 O
+            { "BBRHCJW", 'w', 0, 0}, //000000000 2
+            { "BBRHPJW", 'W', 0, 0}, //000000000 ?
+            { "BBRHCJR", 'r', 0, 0},  //000000000 -
+            { "BBRHPJR", 'R', 0, 0}, //000000000 :
+            { "PTEC",    'J', 1, 0}, //HPJB P
+            { "DEMAIN",  'D', 0, 0}, //---- "
+            { "IINST",   'I', 0, 1}, //003 Z
+            { "ADPS",    'A', 0, 1},
+//          { "IMAX",     0 , 0, 0}, //090 H
+            { "PAPP",    'P', 1, 1}, //00000 !
+/*          { "HHPHC",    0 , 0, 0}, //A , */
+//            { "MOTDETAT", 0 , 0, 0}, //000000 B // KEEP THIS LAST! marks the end of a frame
     };
 
 #define MATCH(X) !memcmp(teleinfo_buf, X, strlen(X))
@@ -103,32 +110,39 @@ void send_line()
 
     unsigned int i = 0;
     for (i = 0; i < sizeof(mapping)/sizeof(mapping[0]); i++) {
-        if (MATCH(mapping[i].name)) {
-            if (mapping[i].frame_type == 0) {
-                // Ignore this field
+        if (!MATCH(mapping[i].name)) {
+            continue;
+        }
+
+        // Ignore field if in holdoff counters
+        if (mapping[i].use_smallskip) {
+            if (frame_smallskip_counter > 0) {
                 return;
             }
-
-            uint8_t data[4];
-            data[0] = mapping[i].frame_type;
-            int pos = strlen(mapping[i].name) + 1;
-            if (MATCH("PTEC") || MATCH("PAPP")) {
-                pos += 1;
-            } 
-            
-            if (MATCH("BBRH")) {
-                uint32_t val = atoi(teleinfo_buf + pos);
-                data[1] = (val >> 16) & 0xFF;
-                data[2] = (val >>  8) & 0xFF;
-                data[3] = val & 0xFF;
-            }  else {
-                memcpy(&data[1], teleinfo_buf + pos, 3);
+        } else {
+            if (frame_bigskip_counter > 0) {
+                return;
             }
-            radio_send(data[0], data[1], data[2], data[3]);
-
-            printf(teleinfo_buf);
-            printf("\r");
         }
+
+        uint8_t data[4];
+        data[0] = mapping[i].frame_type;
+        int pos = strlen(mapping[i].name) + 1;
+        pos += mapping[i].pos_offset; // ignore the first N characters of the frame (1)
+
+        if (MATCH("BBRH")) {
+            uint32_t val = strtol(teleinfo_buf + pos, NULL, 10);
+            // Cannot fit the whole index in 24 bits, so trim the 6 LSBs
+            val = val >> 6;
+            data[1] = (val >> 16) & 0xFF;
+            data[2] = (val >>  8) & 0xFF;
+            data[3] = val & 0xFF;
+        }  else {
+            memcpy(&data[1], teleinfo_buf + pos, 3);
+        }
+
+        // Data is ready to send, should it be sent?
+        radio_send(data[0], data[1], data[2], data[3]);
     }
 }
 
@@ -138,8 +152,6 @@ void consume_teleinfo()
 
     while (edfSerial.available()) {
         char c = edfSerial.read() & 0x7F;
-        // I tried full frame buffering, but it's hard to handle given that the serial line is also used for RF24
-        // Do line buffering instead and prefix each teleinfo line with TELE
         if (c == startFrame) {
             inFrame = true;
             teleinfo_cur = 0;
@@ -149,6 +161,15 @@ void consume_teleinfo()
             inFrame = false;
             teleinfo_buf[teleinfo_cur] = 0;
             teleinfo_cur = 0;
+            // End of frame, adjust holdoff counters
+            frame_bigskip_counter--;
+            frame_smallskip_counter--;
+            if (frame_bigskip_counter < 0) {
+                frame_bigskip_counter = BIGSKIP_INTERVAL;
+            } 
+            if (frame_smallskip_counter < 0) {
+                frame_smallskip_counter = SMALLSKIP_INTERVAL;
+            }
             continue;
         }
         
@@ -183,36 +204,6 @@ void consume_teleinfo()
             }
         }*/
     }
-}
-
-int send_rf24_cmd(uint64_t addr, uint8_t param0, uint8_t param1, uint8_t param2, uint8_t param3)
-{
-	uint8_t payload[4];
-	int ret = -1;
-	payload[0] = param0;
-	payload[1] = param1;
-	payload[2] = param2;
-	payload[3] = param3;
-
-	printf("send rf24...");
-	rf24.stopListening();
-	digitalWrite(LED_YELLOW, 1);
-	delayMicroseconds(10000);
-	rf24.openWritingPipe(addr);
-	rf24.powerUp();
-	delayMicroseconds(10000);
-	bool ok = rf24.write(&payload[0], 4);
-
-	digitalWrite(LED_YELLOW, 0);
-	if (ok) {
-		printf("... successful\n");
-		ret = 0;
-	} else {
-		digitalWrite(LED_RED, 1);
-		printf("... could not send RF24 cmd\n");
-	}
-	rf24.startListening();
-	return ret;
 }
 
 static int init_failed = 0;

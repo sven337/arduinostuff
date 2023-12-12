@@ -6,6 +6,7 @@
 #include "printf.h"
 #include "nRF24L01.h"
 #include "RF24.h"
+#include <avr/sleep.h>
 
 const int CE_PIN = 9;
 const int CSN_PIN = 8;
@@ -34,9 +35,10 @@ int teleinfo_cur = 0;
 
 int8_t frame_bigskip_counter; // how many more frames to skip (for unimportant fields)
 int8_t frame_smallskip_counter; // how many more frames to skip (for important fields)
+uint32_t next_report_battery_at;
 
-#define BIGSKIP_INTERVAL 30 // count 30 full frames (approx 1 min)
-#define SMALLSKIP_INTERVAL 3 
+#define BIGSKIP_INTERVAL 30 // count 30 full frames (approx 90sec)
+#define SMALLSKIP_INTERVAL 3  // approx 9 seconds
 /*
 DEMAIN ---- "
 ADCO 000000000000 J
@@ -94,13 +96,13 @@ void send_line()
             { "BBRHCJR", 'r', 0, 0},  //000000000 -
             { "BBRHPJR", 'R', 0, 0}, //000000000 :
             { "PTEC",    'J', 1, 0}, //HPJB P
-            { "DEMAIN",  'D', 0, 0}, //---- "
+//          { "DEMAIN",   0, 0, 0}, //---- "
             { "IINST",   'I', 0, 1}, //003 Z
             { "ADPS",    'A', 0, 1},
 //          { "IMAX",     0 , 0, 0}, //090 H
             { "PAPP",    'P', 1, 1}, //00000 !
-/*          { "HHPHC",    0 , 0, 0}, //A , */
-//            { "MOTDETAT", 0 , 0, 0}, //000000 B // KEEP THIS LAST! marks the end of a frame
+/*          { "HHPHC",    0 , 0, 0}, //A , 
+            { "MOTDETAT", 0 , 0, 0}, //000000 B */
     };
 
 #define MATCH(X) !memcmp(teleinfo_buf, X, strlen(X))
@@ -216,8 +218,8 @@ ISR(WDT_vect)
 int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
 	uint8_t payload[4] = { p0, p1, p2, p3 };
-	digitalWrite(LED_YELLOW, 1);
-	delayMicroseconds(5000);
+//	digitalWrite(LED_YELLOW, 1);
+    rf24.powerUp();
 	bool ok = rf24.write(payload, 4);
 	if (ok) 
 		Serial.println("send ok");
@@ -225,32 +227,34 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 		Serial.println("send KO");
 	
     printf("sending %c %c %c %c\n", p0, p1, p2, p3);
-	digitalWrite(LED_YELLOW, 0);
+//	digitalWrite(LED_YELLOW, 0);
+    
+    rf24.powerDown();
 
 	if (!ok) {
-		digitalWrite(LED_RED, 1);
+//		digitalWrite(LED_RED, 1);
 		return -1;
 	}
-	digitalWrite(LED_RED, 0);
+//	digitalWrite(LED_RED, 0);
 	return 0;
 }
 
 
 int radio_send_bat(uint16_t bat)
 {
-//	return radio_send('B', thermometer_identification_letter, (bat >> 8) & 0xFF, bat & 0xFF);
-    return 0;
+	return radio_send('S', 'V', (bat >> 8) & 0xFF, bat & 0xFF);
 }
 
 int radio_send_panel(uint16_t panel_voltage)
 {
-//	return radio_send('S', thermometer_identification_letter, (panel_voltage >> 8) & 0xFF, panel_voltage & 0xFF);
     return 0;
+	//return radio_send('S', 'S', thermometer_identification_letter, (panel_voltage >> 8) & 0xFF, panel_voltage & 0xFF);
 }
 
 int radio_send_current(uint16_t panel_voltage, uint16_t panel_resistor_voltage)
 {
-	// Panel -(-> SOLAR_PIN) - resistor (-> SOLAR_RESISTOR_PIN) - circuit
+    return 0;
+	/*// Panel -(-> SOLAR_PIN) - resistor (-> SOLAR_RESISTOR_PIN) - circuit
 	// So the current is the voltage across the resistor, which is panel_voltage - panel_resistor_voltage
 	// It's not supposed to be negative but I've observed -1 in some cases, so make the difference signed.
 	int16_t value = panel_voltage - panel_resistor_voltage;
@@ -258,8 +262,7 @@ int radio_send_current(uint16_t panel_voltage, uint16_t panel_resistor_voltage)
 	// Resistor is set to 22 ohm
 	// U = R.I so I = U / 22, send it *1000 to see something
 	value = 1000 * (value  * 3.3f / 1024) / 22;
-//	return radio_send('C', thermometer_identification_letter, (value >> 8) & 0xFF, value & 0xFF);
-    return 0;
+	return radio_send('S', 'C', (value >> 8) & 0xFF, value & 0xFF);*/
 }
 
 void setup(){
@@ -340,47 +343,18 @@ void loop()
 	uint16_t panel_voltage = analogRead(SOLAR_PIN);
 	uint16_t resistor_voltage = analogRead(SOLAR_RESISTOR_PIN);
 #endif
-	rf24.powerUp();
-
-	bool fail = radio_send_bat(battery_level);
+    if (millis() > next_report_battery_at) {
+        bool fail = radio_send_bat(battery_level);
 #if HAS_SOLAR_PANEL
-	fail &= radio_send_panel(panel_voltage);
-	fail &= radio_send_current(panel_voltage, resistor_voltage);
+        fail &= radio_send_panel(panel_voltage);
+        fail &= radio_send_current(panel_voltage, resistor_voltage);
 #endif
-/*
-	i = 3;
-
-	while (i--) {
-	    fail = radio_send('T', thermometer_identification_letter, (raw >> 8) & 0xFF, raw & 0xFF);
-		if (!fail) {
-			break;
-		}
-        // Indicate failure to receive ACK
-        fail = radio_send('F', thermometer_identification_letter, i, 0);
-		Sleepy::loseSomeTime(2048L);
-	}
-    */
-    /*
-sleep:	
-#if HAS_RF24
-	rf24.powerDown();
-#endif
-	Serial.println("going to sleep now");
-	Serial.flush();
-	Sleepy::loseSomeTime(32768L);
-	Serial.println("waking up");
-
-	for (int i = 1; i < 15L*60L*1000L / 32768L; i++) {
-#if HAS_SOLAR_PANEL
-		if (battery_voltage(battery_level) >= 1.4f) {
-			// Battery is overcharged, try to waste energy!
-			delay(10000);
-		}
-#endif
-		if (!Sleepy::loseSomeTime(32768L)) {
-			Serial.println("woken up by intr");
-		}
-	}*/
+        next_report_battery_at = millis() + 30 * 60 * 1000L;
+    }
+               
+    /*set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+    sleep_enable();
+    sleep_cpu();*/
 }
 
 

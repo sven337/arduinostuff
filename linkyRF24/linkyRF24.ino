@@ -10,22 +10,12 @@
 
 const int CE_PIN = 9;
 const int CSN_PIN = 8;
-const int BATTERY_PIN = A3;
-const int SOLAR_PIN = A0;
-const int SOLAR_RESISTOR_PIN = A1;
 const int LED_YELLOW = 5;
 const int LED_RED = 4;
-
-const uint64_t pipe_linky  = 0xF0F0F0F0F3LL;
-
-#define PIPE_GAZ_ID 1
-#define PIPE_MAILBOX_ID 3
-#define PIPE_THERMOMETER_ID 4
 
 #define startFrame 0x02
 #define endFrame 0x03
 
-#define HAS_SOLAR_PANEL 0
 const uint64_t pipe_address = 0xF0F0F0F0F3LL;
 RF24 rf24(CE_PIN, CSN_PIN);
 
@@ -143,7 +133,7 @@ void send_line()
             memcpy(&data[1], teleinfo_buf + pos, 3);
         }
 
-        // Data is ready to send, should it be sent?
+        // Send data
         radio_send(data[0], data[1], data[2], data[3]);
     }
 }
@@ -189,22 +179,6 @@ void consume_teleinfo()
             continue;
         }
         teleinfo_buf[teleinfo_cur++] = c;
-/*
-        // Ignore fields
-             "IMAX", 
-             "ADCO", 
-             "HHPHC",
-             "ISOUSC", 
-             "OPTARIF", 
-             "MOTDETAT", 
-        if (teleinfo_cur == 4) {
-            if (!memcmp(teleinfo_buf, "IMAX", 4) ||
-                !memcmp(teleinfo_buf, "ADCO", 4)) {
-                // 1200baud = 6.66ms per character, sleep for a bit
-                Sleepy::loseSomeTime(16);
-                ignore_frame = 1;
-            }
-        }*/
     }
 }
 
@@ -237,32 +211,6 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	}
 //	digitalWrite(LED_RED, 0);
 	return 0;
-}
-
-
-int radio_send_bat(uint16_t bat)
-{
-	return radio_send('S', 'V', (bat >> 8) & 0xFF, bat & 0xFF);
-}
-
-int radio_send_panel(uint16_t panel_voltage)
-{
-    return 0;
-	//return radio_send('S', 'S', thermometer_identification_letter, (panel_voltage >> 8) & 0xFF, panel_voltage & 0xFF);
-}
-
-int radio_send_current(uint16_t panel_voltage, uint16_t panel_resistor_voltage)
-{
-    return 0;
-	/*// Panel -(-> SOLAR_PIN) - resistor (-> SOLAR_RESISTOR_PIN) - circuit
-	// So the current is the voltage across the resistor, which is panel_voltage - panel_resistor_voltage
-	// It's not supposed to be negative but I've observed -1 in some cases, so make the difference signed.
-	int16_t value = panel_voltage - panel_resistor_voltage;
-
-	// Resistor is set to 22 ohm
-	// U = R.I so I = U / 22, send it *1000 to see something
-	value = 1000 * (value  * 3.3f / 1024) / 22;
-	return radio_send('S', 'C', (value >> 8) & 0xFF, value & 0xFF);*/
 }
 
 void setup(){
@@ -338,20 +286,6 @@ void loop()
         consume_teleinfo();
     }
 
-	uint16_t battery_level = analogRead(BATTERY_PIN);
-#if HAS_SOLAR_PANEL
-	uint16_t panel_voltage = analogRead(SOLAR_PIN);
-	uint16_t resistor_voltage = analogRead(SOLAR_RESISTOR_PIN);
-#endif
-    if (millis() > next_report_battery_at) {
-        bool fail = radio_send_bat(battery_level);
-#if HAS_SOLAR_PANEL
-        fail &= radio_send_panel(panel_voltage);
-        fail &= radio_send_current(panel_voltage, resistor_voltage);
-#endif
-        next_report_battery_at = millis() + 30 * 60 * 1000L;
-    }
-               
     /*set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();
     sleep_cpu();*/

@@ -10,8 +10,12 @@
 
 const int CE_PIN = 9;
 const int CSN_PIN = 8;
+const int DS18B20_PIN = 7;
+const int WATER_PULSE_PIN = 6;
 const int LED_YELLOW = 5;
 const int LED_RED = 4;
+const int GAS_PULSE_PIN = 3;
+const int LINKY_RX = 2;
 
 #define startFrame 0x02
 #define endFrame 0x03
@@ -19,7 +23,18 @@ const int LED_RED = 4;
 const uint64_t pipe_address = 0xF0F0F0F0F3LL;
 RF24 rf24(CE_PIN, CSN_PIN);
 
-SoftwareSerial edfSerial(2, 6); //RX, TX (unused TX)
+// Pin change interrupts are not compatible with SoftwareSerial :(
+struct {
+    bool armed;
+    uint32_t holdoff;
+    int pin;
+    char radiochar;
+} watergas[] = {
+        { true, 0, WATER_PULSE_PIN, 'E' },
+        { true, 0, GAS_PULSE_PIN, 'G' },
+};
+
+SoftwareSerial edfSerial(LINKY_RX, LED_YELLOW); //RX, TX (unused TX)
 char teleinfo_buf[255];
 int teleinfo_cur = 0;
 
@@ -96,9 +111,6 @@ void send_line()
     };
 
 #define MATCH(X) !memcmp(teleinfo_buf, X, strlen(X))
-
-    char *p = &teleinfo_buf[0];
-
 
     unsigned int i = 0;
     for (i = 0; i < sizeof(mapping)/sizeof(mapping[0]); i++) {
@@ -232,6 +244,7 @@ void setup(){
 	rf24.openReadingPipe(1, pipe_address);
 
 	rf24.printDetails();
+	rf24.printPrettyDetails();
 
 	if ((rf24.getDataRate() != RF24_250KBPS) ||
 		(rf24.getCRCLength() != RF24_CRC_16)) {
@@ -257,12 +270,9 @@ void setup(){
 	digitalWrite(LED_YELLOW, 0);
 
 	rf24.powerDown();
-}
 
-float battery_voltage(uint16_t battery_level)
-{
-	float lvl = (float)battery_level * 3.3 / 65536.0;
-	return lvl;
+    pinMode(WATER_PULSE_PIN, INPUT_PULLUP);
+    pinMode(GAS_PULSE_PIN, INPUT_PULLUP);
 }
 
 void loop() 
@@ -285,6 +295,25 @@ void loop()
     if (edfSerial.available()) {
         consume_teleinfo();
     }
+
+    for (int i = 0; i < sizeof(watergas)/sizeof(watergas[0]); i++) {
+       /* if (millis() > watergas[i].holdoff)*/ {
+            // Rearm for next pulse
+            if (digitalRead(watergas[i].pin)) {
+                watergas[i].armed = true;
+            } else {
+                // If 0 (pulse in progress)...
+                if (watergas[i].armed) {
+                    // ... send it if armed, then disarm until pin value changes
+                    radio_send(watergas[i].radiochar, 0, 0, 0);
+                    watergas[i].armed = false;
+                }
+                watergas[i].holdoff = millis() + 200;
+                // XXX overflow hazard
+            }
+        }
+    }
+
 
     /*set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();

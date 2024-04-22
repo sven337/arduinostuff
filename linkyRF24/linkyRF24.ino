@@ -244,7 +244,6 @@ void setup(){
 	rf24.openReadingPipe(1, pipe_address);
 
 	rf24.printDetails();
-	rf24.printPrettyDetails();
 
 	if ((rf24.getDataRate() != RF24_250KBPS) ||
 		(rf24.getCRCLength() != RF24_CRC_16)) {

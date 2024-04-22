@@ -23,10 +23,7 @@ const uint64_t pipe_thermometer  = 0xF0F0F0F0F4LL;
 #define endFrame 0x03
 
 #define HAS_RF24 1
-RF24 rf24(CE_PIN, CSN_PIN);
-SoftwareSerial edfSerial(2, 6); //RX, TX (unused TX)
-char teleinfo_buf[255];
-int teleinfo_cur = 0;
+RF24 rf24(CE_PIN, CSN_PIN, 4000000);
 
 OneWire ds(DS18B20_PIN);
 uint32_t send_next_temperature_at = 1000;
@@ -44,48 +41,6 @@ struct {
 
 char serial_cmd[255];
 int serial_cmd_cur = 0;
-
-void send_line()
-{
-    printf("TELE %s", teleinfo_buf);
-}
-
-void consume_teleinfo()
-{
-    static bool inFrame = false;
-
-    while (edfSerial.available()) {
-        char c = edfSerial.read() & 0x7F;
-        // I tried full frame buffering, but it's hard to handle given that the serial line is also used for RF24
-        // Do line buffering instead and prefix each teleinfo line with TELE
-        if (c == startFrame) {
-            inFrame = true;
-            teleinfo_cur = 0;
-            teleinfo_buf[teleinfo_cur] = 0;
-            continue;
-        } else if (c == endFrame) {
-            inFrame = false;
-            teleinfo_buf[teleinfo_cur] = 0;
-            teleinfo_cur = 0;
-            continue;
-        }
-        
-        if (!inFrame) {
-            continue;
-        }
-
-        if (c == '\n' || c == '\r') {
-            teleinfo_buf[teleinfo_cur++] = '\n';
-            teleinfo_buf[teleinfo_cur] = 0;
-            if (teleinfo_cur > 1) {
-                send_line();
-            }
-            teleinfo_cur = 0;
-            continue;
-        }
-        teleinfo_buf[teleinfo_cur++] = c;
-    }
-}
 
 int send_rf24_cmd(uint64_t addr, uint8_t param0, uint8_t param1, uint8_t param2, uint8_t param3)
 {
@@ -123,7 +78,6 @@ void setup()
 {
     printf_begin();
     Serial.begin(115200);
-    edfSerial.begin(1200); 
 #if HAS_RF24
 	rf24.begin();
 	rf24.powerDown();
@@ -275,10 +229,6 @@ void send_temperature()
 
 void loop()
 {
-/*    if (edfSerial.available()) {
-        consume_teleinfo();
-    }*/
-
     while (Serial.available()) {
         char c = Serial.read();
         if (c == '\r') {

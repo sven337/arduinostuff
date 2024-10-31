@@ -12,9 +12,11 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// Pin definitions
-const int PUMP1_PIN = 32;
-const int PUMP2_PIN = 33;
+// Pumps
+const int pump_pins[] = { 32, 33 };
+unsigned long pump_stop_at[2];
+bool pump_running[2];
+
 
 // Global objects
 Adafruit_ADS1115 ads;
@@ -29,12 +31,15 @@ float orpValue = 0;
 float waterTemp = 0;
 float airTemp = 0;
 
-// Pump control variables
-unsigned long pump1StartTime = 0;
-unsigned long pump2StartTime = 0;
-bool pump1Running = false;
-bool pump2Running = false;
-
+float orp_target = 750.0;  // Default ORP target
+bool orp_regulation_enabled = false;
+unsigned long last_chlorine_injection = 0;
+const unsigned long MIN_INJECTION_INTERVAL = 300000;  // 5 minutes
+const unsigned long CHLORINE_INJECTION_TIME = 10;   // 10 seconds injection
+    
+unsigned long next_publish_at = 0;
+unsigned long next_read_data_at = 0;
+                                                      //
 // HTML page
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
@@ -42,6 +47,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <head>
     <title>OpenBopi Control</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta charset="utf-8">
     <style>
         body { font-family: Arial; text-align: center; }
         .button { background-color: #4CAF50; color: white; padding: 10px 20px; 
@@ -56,7 +62,10 @@ const char index_html[] PROGMEM = R"rawliteral(
         <p>ORP Value: <span id="orp">%ORP%</span> mV</p>
         <p>Water Temperature: <span id="watertemp">%WATERTEMP%</span>°C</p>
         <p>Air Temperature: <span id="airtemp">%AIRTEMP%</span>°C</p>
+        <p>ORP Regulation: <span id="orp_regulation">%ORP_REGULATION%</span></p>
+        <p>ORP Target: <input type="number" id="orp_target" value="%ORP_TARGET%" onchange="updateORPTarget(this.value)"> mV</p>
     </div>
+    <button class="button" onclick="toggleORPRegulation()">Toggle ORP Regulation</button>
     <button class="button" onclick="activatePump(1)">Activate Pump 1 (10s)</button>
     <button class="button" onclick="activatePump(2)">Activate Pump 2 (10s)</button>
     <script>
@@ -74,7 +83,17 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('watertemp').innerHTML = data.watertemp;
                     document.getElementById('airtemp').innerHTML = data.airtemp;
                 });
-        }, 2000);
+        }, 5000);
+         function updateORPTarget(value) {
+            fetch('/orp_target?value=' + value)
+                .then(response => response.text())
+                .then(data => console.log(data));
+        }
+        function toggleORPRegulation() {
+            fetch('/toggle_regulation')
+                .then(response => response.text())
+                .then(data => console.log(data));
+        }
     </script>
 </body>
 </html>
@@ -113,71 +132,31 @@ void publishStatus() {
                    ",\"orp\":" + String(orpValue, 2) +
                   ",\"watertemp\":" + String(waterTemp, 2) + 
                    ",\"airtemp\":" + String(airTemp, 2) +
-                   ",\"pump1\":" + String(pump1Running) +
-                   ",\"pump2\":" + String(pump2Running) + "}";
+                   ",\"pump1\":" + String(pump_running[0]) +
+                   ",\"pump2\":" + String(pump_running[1]) +
+                   ",\"orp_regulation\":" + String(orp_regulation_enabled) +
+                   ",\"orp_target\":" + String(orp_target) + "}";
     mqtt.publish("openbopi/pH", String(phValue, 2));
     mqtt.publish("openbopi/ORP", String(orpValue, 2));
-    mqtt.publish("openbopi/pump1", String(pump1Running));
-    mqtt.publish("openbopi/pump2", String(pump2Running));
+    mqtt.publish("openbopi/orp_target", String(orp_target, 2));
+    mqtt.publish("openbopi/orp_regulation", String(orp_regulation_enabled));
+    mqtt.publish("openbopi/pump1", String(pump_running[0]));
+    mqtt.publish("openbopi/pump2", String(pump_running[1]));
     mqtt.publish("openbopi/watertemp", String(waterTemp, 2));
     mqtt.publish("openbopi/airtemp", String(airTemp, 2));
     Serial.println(status);
 }
 
-void checkPumps() {
-    if (pump1Running && (millis() - pump1StartTime >= 10000)) {
-        digitalWrite(PUMP1_PIN, LOW);
-        pump1Running = false;
-    }
-    if (pump2Running && (millis() - pump2StartTime >= 10000)) {
-        digitalWrite(PUMP2_PIN, LOW);
-        pump2Running = false;
-    }
-}
-
-void setupWebServer() {
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String html = String(index_html);
-        html.replace("%PH%", String(phValue, 2));
-        html.replace("%ORP%", String(orpValue, 2));
-        html.replace("%WATERTEMP%", String(waterTemp, 2));
-        html.replace("%AIRTEMP%", String(airTemp, 2));
-        request->send(200, "text/html", html);
-    });
-
-    server.on("/pump", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (request->hasParam("id")) {
-            int pumpId = request->getParam("id")->value().toInt();
-            if (pumpId == 1 && !pump1Running) {
-                digitalWrite(PUMP1_PIN, HIGH);
-                pump1Running = true;
-                pump1StartTime = millis();
-            } else if (pumpId == 2 && !pump2Running) {
-                digitalWrite(PUMP2_PIN, HIGH);
-                pump2Running = true;
-                pump2StartTime = millis();
-            }
-        }
-        request->send(200, "text/plain", "OK");
-    });
-
-    server.on("/values", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String json = "{\"ph\":" + String(phValue, 2) + 
-                     ",\"orp\":" + String(orpValue, 2) + "}";
-        request->send(200, "application/json", json);
-    });
-
-    server.begin();
-}
-
 void read_pH_ORP() {
     // Read pH from ADS1115 A0
-    int16_t adc2 = ads.readADC_SingleEnded(2);
+    /*int16_t adc2 = ads.readADC_SingleEnded(2);
     int16_t adc3 = ads.readADC_SingleEnded(3);
     float v2 = ads.computeVolts(adc2); 
-    float v3 = ads.computeVolts(adc3); 
-    phValue = (v2 - v3) * 1000.0;
-   // * 3.5; // Convert to pH (adjust multiplier as needed)
+    float v3 = ads.computeVolts(adc3); */
+    int16_t adc2 = ads.readADC_Differential_2_3();
+    float v2 = ads.computeVolts(adc2); 
+    mqtt.publish("openbopi/ph_volt", String(v2, 3));
+    phValue = 2.4375 + (1.53 - v2) / 0.14; // wtf but this seems to be what bopi does
     
     // Read ORP from ADS1115 A1
     int16_t adc0 = ads.readADC_Differential_0_1();
@@ -191,11 +170,9 @@ void readTemperatures() {
     
     // Check for valid readings
     if (waterTemp == DEVICE_DISCONNECTED_C) {
-        Serial.println("Error reading water temperature sensor");
         waterTemp = -127;
     }
     if (airTemp == DEVICE_DISCONNECTED_C) {
-        Serial.println("Error reading air temperature sensor");
         airTemp = -127;
     }
 }
@@ -210,19 +187,166 @@ void setupTempSensors() {
     Serial.println(" temperature sensors.");
 }
 
+void start_pump(unsigned int index, int duration)
+{
+    if (index > 1) {
+        return;
+    }
+
+    if (duration > 300) {
+        return;
+    }
+
+    pump_stop_at[index] = millis() + duration * 1000;
+    pump_running[index] = true;
+
+    digitalWrite(pump_pins[index], HIGH);
+    next_publish_at = millis();
+
+}
+
+void stop_pump(unsigned int index)
+{
+    if (index > 1) {
+        return;
+    }
+
+    pump_stop_at[index] = 0;
+    pump_running[index] = false;
+    digitalWrite(pump_pins[index], LOW);
+    next_publish_at = millis();
+}
+
+void checkPumps() {
+    for (unsigned int i = 0; i < 2; i++) {
+        if (!pump_running[i]) 
+            continue;
+
+        if (millis() > pump_stop_at[i]) {
+            stop_pump(i);
+        }
+    }
+}
+
+void mqtt_show_status_cb(const char *payload) 
+{
+    next_publish_at = millis();
+}
+
+void mqtt_force_pump_cb(const char *payload) 
+{
+    int pumpId = atoi(payload);
+    start_pump(pumpId, 10);
+}
+
+void mqtt_set_orp_target_cb(const char *payload) 
+{
+    orp_target = atof(payload);
+    next_publish_at = millis();
+}
+
+
+void toggle_ORP_regulation(bool status)
+{
+    if (status == orp_regulation_enabled) {
+        return;
+    }
+
+    orp_regulation_enabled = status;
+    next_publish_at = millis();
+}
+
+void mqtt_enable_orp_regulation_cb(const char *payload) 
+{
+    toggle_ORP_regulation(atoi(payload));
+}
+
+void checkORPRegulation() {
+    if (!orp_regulation_enabled) 
+        return;
+    
+    if (phValue > 7.5) {
+        mqtt.publish("openbopi/status", "pH too high for chlorine injection: suspected problem");
+        return;
+    }
+
+    if (orpValue < 400) {
+        mqtt.publish("openbopi/status", "ORP abnormally low");
+    }
+    
+    unsigned long now = millis();
+    if (orpValue < orp_target && 
+        !pump_running[1] &&
+        (now - last_chlorine_injection) > MIN_INJECTION_INTERVAL) {
+       
+        start_pump(0, CHLORINE_INJECTION_TIME);
+        mqtt.publish("openbopi/status", "Injecting chlorine");
+    }
+}
+
+void setupWebServer() {
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String html = String(index_html);
+        html.replace("%PH%", String(phValue, 2));
+        html.replace("%ORP%", String(orpValue, 2));
+        html.replace("%WATERTEMP%", String(waterTemp, 2));
+        html.replace("%AIRTEMP%", String(airTemp, 2));
+        html.replace("%ORP_REGULATION%", String(orp_regulation_enabled));
+        html.replace("%ORP_TARGET%", String(orp_target, 3));
+        request->send(200, "text/html", html);
+    });
+
+    server.on("/pump", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (request->hasParam("id")) {
+            int pumpId = request->getParam("id")->value().toInt();
+            start_pump(pumpId - 1, 10);
+        }
+        request->send(200, "text/plain", "OK");
+    });
+
+    server.on("/values", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String json = "{\"ph\":" + String(phValue, 2) + 
+                     ",\"orp\":" + String(orpValue, 2) + 
+                     ",\"watertemp\":" + String(waterTemp, 2) + 
+                     ",\"airtemp\":" + String(airTemp, 2) + 
+                     "}";
+        request->send(200, "application/json", json);
+    });
+
+     server.on("/orp_target", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (request->hasParam("value")) {
+            orp_target = request->getParam("value")->value().toFloat();
+        }
+        request->send(200, "text/plain", "OK");
+    });
+
+    server.on("/toggle_regulation", HTTP_GET, [](AsyncWebServerRequest *request) {
+        toggle_ORP_regulation(!orp_regulation_enabled);
+        request->send(200, "text/plain", orp_regulation_enabled ? "ON" : "OFF");
+    });
+
+    server.begin();
+}
+
+
 void setup() {
     Serial.begin(115200);
     
-    pinMode(PUMP1_PIN, OUTPUT);
-    pinMode(PUMP2_PIN, OUTPUT);
-    digitalWrite(PUMP1_PIN, LOW);
-    digitalWrite(PUMP2_PIN, LOW);
+    pinMode(pump_pins[0], OUTPUT);
+    pinMode(pump_pins[1], OUTPUT);
+    digitalWrite(pump_pins[0], LOW);
+    digitalWrite(pump_pins[1], LOW);
     
     setupWiFi();
     setupOTA();
     setupADC();
     setupTempSensors();
-    
+   
+    mqtt.subscribe("openbopi/show_status", &mqtt_show_status_cb);
+    mqtt.subscribe("openbopi/force_pump_10sec", &mqtt_force_pump_cb);
+    mqtt.subscribe("openbopi/set_orp_target", &mqtt_set_orp_target_cb);
+    mqtt.subscribe("openbopi/enable_orp_regulation", &mqtt_enable_orp_regulation_cb);
+
     mqtt.begin();
     mqtt.loop();
     setupWebServer();
@@ -232,15 +356,19 @@ void setup() {
 void loop() {
     ArduinoOTA.handle();
     mqtt.loop();
-    
-    static unsigned long lastRead = 0;
-    if (millis() - lastRead >= 1000) {
+   
+    if (millis() > next_read_data_at) {
         read_pH_ORP();
         readTemperatures();
+        next_read_data_at = millis() + 5000;
+    }
+
+    if (millis() > next_publish_at) {
         publishStatus();
-        lastRead = millis();
+        next_publish_at = millis() + 5 * 60 * 1000;
     }
     
+    checkORPRegulation();
     checkPumps();
 }
 

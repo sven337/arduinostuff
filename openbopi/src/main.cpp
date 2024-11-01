@@ -128,7 +128,7 @@ void setupADC() {
 
 void publishStatus() {
     String status = "{\"ph\":" + String(phValue, 2) + 
-                   ",\"orp\":" + String(orpValue, 2) +
+                   ",\"orp\":" + String(orpValue, 0) +
                   ",\"watertemp\":" + String(waterTemp, 2) + 
                    ",\"airtemp\":" + String(airTemp, 2) +
                    ",\"pump1\":" + String(pump_running[0]) +
@@ -136,8 +136,8 @@ void publishStatus() {
                    ",\"orp_regulation\":" + String(orp_regulation_enabled) +
                    ",\"orp_target\":" + String(orp_target) + "}";
     mqtt.publish("openbopi/pH", String(phValue, 2));
-    mqtt.publish("openbopi/ORP", String(orpValue, 2));
-    mqtt.publish("openbopi/orp_target", String(orp_target, 2));
+    mqtt.publish("openbopi/ORP", String(orpValue, 0));
+    mqtt.publish("openbopi/orp_target", String(orp_target, 0));
     mqtt.publish("openbopi/orp_regulation", String(orp_regulation_enabled));
     mqtt.publish("openbopi/pump1", String(pump_running[0]));
     mqtt.publish("openbopi/pump2", String(pump_running[1]));
@@ -276,6 +276,7 @@ void checkORPRegulation() {
         !pump_running[1] &&
         (now - last_chlorine_injection) > MIN_INJECTION_INTERVAL) {
        
+        last_chlorine_injection = now;
         start_pump(1, CHLORINE_INJECTION_TIME);
         mqtt.publish("openbopi/status", "Injecting chlorine");
     }
@@ -285,7 +286,7 @@ void setupWebServer() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         String html = String(index_html);
         html.replace("%PH%", String(phValue, 2));
-        html.replace("%ORP%", String(orpValue, 2));
+        html.replace("%ORP%", String(orpValue, 0));
         html.replace("%WATERTEMP%", String(waterTemp, 2));
         html.replace("%AIRTEMP%", String(airTemp, 2));
         html.replace("%ORP_REGULATION%", String(orp_regulation_enabled));
@@ -303,7 +304,7 @@ void setupWebServer() {
 
     server.on("/values", HTTP_GET, [](AsyncWebServerRequest *request) {
         String json = "{\"ph\":" + String(phValue, 2) + 
-                     ",\"orp\":" + String(orpValue, 2) + 
+                     ",\"orp\":" + String(orpValue, 0) + 
                      ",\"watertemp\":" + String(waterTemp, 2) + 
                      ",\"airtemp\":" + String(airTemp, 2) + 
                      "}";

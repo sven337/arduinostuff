@@ -27,6 +27,14 @@ OpenBopi is an open-source replacement firmware for the [BoPi pool controller ha
 - MQTT support
 - Integration with Home Assistant
 
+### Missing features
+
+- pH regulation (easy to add)
+- onboard RTC (useless?)
+- onboard DHT11 (useless?)
+- relay control (easy to add)
+- add more HW features by hacking on the board, but honestly it's probably better to build this from scratch as the board is not an improvement over the piecewise BOM from [ESP32-PoolMaster](https://github.com/Gixy31/ESP32-PoolMaster/blob/main/BOM.xlsx) as long as you use the same cheap pumps and probes as Bopi does
+
 ## Hardware Details
 
 ### Board Components

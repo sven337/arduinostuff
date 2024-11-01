@@ -13,6 +13,7 @@
 #include <DallasTemperature.h>
 
 #include <DHT.h>
+#include <ESPmDNS.h>
 
 // Pumps
 const int pump_pins[] = { 32, 33 };
@@ -35,10 +36,10 @@ float airTemp = 0;
 float boxTemp = 0;
 float boxHumidity = 0;
 
-float orp_target = 750.0;  // Default ORP target
+float orp_target = 680.0;  // Default ORP target
 bool orp_regulation_enabled = false;
 unsigned long last_chlorine_injection = 0;
-const unsigned long MIN_INJECTION_INTERVAL = 300000;  // 5 minutes
+const unsigned long MIN_INJECTION_INTERVAL = 3 * 60 * 1000;  // 3 minutes
 const unsigned long CHLORINE_INJECTION_TIME = 10;   // 10 seconds injection
     
 unsigned long next_publish_at = 0;
@@ -107,8 +108,18 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+void WiFiStationDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.println("Disconnected from WiFi access point");
+    Serial.print("WiFi lost connection. Reason: ");
+    Serial.println(info.wifi_sta_disconnected.reason);
+    WiFi.begin(ssid, password);
+}
+
 void setupWiFi() {
+    WiFi.setHostname("openbopi");
     WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
@@ -116,6 +127,7 @@ void setupWiFi() {
     }
     Serial.println("\nWiFi connected");
     Serial.println("IP address: " + WiFi.localIP().toString());
+    WiFi.onEvent(WiFiStationDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 }
 
 void setupOTA() {
@@ -166,7 +178,32 @@ void read_pH_ORP() {
     
     // Read ORP from ADS1115 A0/1
     int16_t adc0 = ads.readADC_Differential_0_1();
-    orpValue = ads.computeVolts(adc0) * 1000.0;
+    float newOrpValue = ads.computeVolts(adc0) * 1000.0;
+
+    // Filter ORP?
+    // PoolMaster averages the 5 middle values in a buffer of 10, but takes 8
+    // samples per second.
+    // https://github.com/Gixy31/ESP32-PoolMaster/blob/ce8bc6853e5e7f942b50a10a78e9c2564d3d9e38/src/Loops.cpp#L36
+    // I haven't seen a mathematical justification for it.
+    // https://forum.arduino.cc/t/poolmaster-gestion-et-domotisation-de-ma-piscine/563058/895
+    //
+    //
+    // BoPi averages the 18 middle values in a buffer of 20, I do not know the
+    // exact sample rate (once per loop call?).
+    //
+    // In both cases this seems way higher than we need, since the swimming pool
+    // is a very large body of water in which we're diluting our chlorine,
+    // meaning that it will dampen variations dramatically. It seems unlikely
+    // that the chlorine will take less than 5 minutes to fully dilute into the
+    // water, so I do not naturally see why a higher rate of sampling is
+    // helpful.
+    //
+    // This also implies that a tight regulation loop isn't needed - just inject
+    // when you need more at a low duty cycle and you should be good. PID seems
+    // overkill.
+    //
+    // In my filtering evaluations (see the img/ folder), an exponential moving average actually works better than a median filter (as implemented by PoolMaster) or a winsorized means (as implemented by Bopi). These were done with 25 measurements/sec (streaming as fast as possible).
+    orpValue = (9 * orpValue + newOrpValue) / 10;
 }
 
 void readTemperatures() {
@@ -283,11 +320,16 @@ void mqtt_enable_orp_regulation_cb(const char *payload)
 }
 
 void checkORPRegulation() {
-    if (!orp_regulation_enabled) 
+    if (!orp_regulation_enabled) {
+        if (pump_running[1]) {
+            stop_pump(1);
+        }
         return;
+    }
     
     if (phValue > 7.5) {
         mqtt.publish("openbopi/status", "pH too high for chlorine injection: suspected problem");
+        toggle_ORP_regulation(0);
         stop_pump(1);
         return;
     }
@@ -351,6 +393,14 @@ void setupWebServer() {
     server.begin();
 }
 
+void setupMDNS() {
+    if (!MDNS.begin("openbopi")) {
+        Serial.println("Error setting up MDNS responder!");
+        return;
+    }
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS responder started at openbopi.local");
+}
 
 void setup() {
     Serial.begin(115200);
@@ -361,6 +411,7 @@ void setup() {
     digitalWrite(pump_pins[1], LOW);
    
     dht.begin();
+    setupMDNS();
     setupWiFi();
     setupOTA();
     setupADC();
@@ -381,8 +432,9 @@ void loop() {
     ArduinoOTA.handle();
     mqtt.loop();
    
+    read_pH_ORP();
+
     if (millis() > next_read_data_at) {
-        read_pH_ORP();
         readTemperatures();
         readDHT11();
         next_read_data_at = millis() + 5000;
@@ -395,5 +447,13 @@ void loop() {
     
     checkORPRegulation();
     checkPumps();
+
+#if 0
+    // Debug code to stream values for filter tuning
+    read_pH_ORP();
+    mqtt.publish("openbopi/pH", String(phValue, 2));
+    mqtt.publish("openbopi/ORP", String(orpValue, 0));
+#endif
+
 }
 

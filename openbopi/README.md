@@ -99,7 +99,7 @@ Ideally, do not do it with the AC input connected, as the HW design in unsafe wi
 3. Create `wifi.params.h` containing: 
 ```C
 const char *ssid     = "your_ssid";
-   const char *password = "your_password";
+const char *password = "your_password";
 ```
 4. Create `mqtt_login.h` containing:
 ```C

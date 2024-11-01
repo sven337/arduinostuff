@@ -105,17 +105,86 @@ Add the following to your Home Assistant configuration:
 ```yaml
 mqtt:
   sensor:
-    - name: "Pool pH"
+    - name: pool_pH
+      unique_id: "openbopi_ph"
       state_topic: "openbopi/pH"
       unit_of_measurement: "pH"
       device_class: "ph"
-      
-    - name: "Pool ORP"
+      state_class: "measurement"
+      device:
+        identifiers: ["openbopi_pool"]
+        name: "OpenBopi"
+
+    - name: pool_ORP
+      unique_id: "openbopi_orp"
       state_topic: "openbopi/ORP"
       unit_of_measurement: "mV"
       device_class: "voltage"
-      
-    # ... (see full YAML configuration in documentation)
+      state_class: "measurement"
+      device:
+        identifiers: ["openbopi_pool"]
+
+    - name: pool_filter_water_temp
+      unique_id: "openbopi_water_temp"
+      state_topic: "openbopi/watertemp"
+      unit_of_measurement: "°C"
+      device_class: "temperature"
+      state_class: "measurement"
+      device:
+        identifiers: ["openbopi_pool"]
+
+    - name: pool_air_temperature
+      unique_id: "openbopi_air_temp"
+      state_topic: "openbopi/airtemp"
+      unit_of_measurement: "°C"
+      device_class: "temperature"
+      state_class: "measurement"
+      device:
+        identifiers: ["openbopi_pool"]
+
+  binary_sensor:
+    - name: pool_bopi_peripump1_status
+      unique_id: "openbopi_pump1"
+      state_topic: "openbopi/pump1"
+      device_class: "running"
+      payload_on: "1"
+      payload_off: "0"
+      device:
+        identifiers: ["openbopi_pool"]
+
+    - name: pool_bopi_chlorinepump_status
+      unique_id: "openbopi_pump2"
+      state_topic: "openbopi/pump2"
+      payload_on: "1"
+      payload_off: "0"
+      device_class: "running"
+      device:
+        identifiers: ["openbopi_pool"]
+
+  switch:
+    - name: pool_orp_regulation_control
+      unique_id: "openbopi_orp_regulation_control"
+      command_topic: "openbopi/enable_orp_regulation"
+      state_topic: "openbopi/orp_regulation"
+      payload_on: "1"
+      payload_off: "0"
+      device:
+        identifiers: ["openbopi_pool"]
+
+  number:
+    - name: pool_ORP_target
+      unique_id: "openbopi_orp_target"
+      state_topic: "openbopi/orp_target"
+      command_topic: "openbopi/set_orp_target"
+      min: 500
+      max: 800
+      step: 10
+      unit_of_measurement: "mV"
+      device_class: "voltage"
+      device:
+        identifiers: ["openbopi_pool"]
+
+
 ```
 
 ## License

@@ -83,6 +83,12 @@ float thermostat_target_temp;
 
 char logStr[1024];
 
+// Stove status
+int stove_status;
+uint32_t stove_status_since;
+// Hold off triggering the boiler to let the stove heat up the room
+uint32_t holdoff_for_stove_until;
+
 // Enqueue a mode change, to avoid mqtt receive callbacks calling mqtt.publish which crashes
 void queue_change_mode(enum MODE mode)
 {
@@ -169,6 +175,7 @@ static void handleForceOn()
 
 char tempBuf[4096];
 char lastLogStr[1024];
+
 static void handleRoot() {
 	int sec = millis() / 1000;
 	int min = sec / 60;
@@ -181,7 +188,7 @@ static void handleRoot() {
 <head><title>Boiler control</title></head><body>\
     <h1>Boiler control</h1><p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d = %d ms</p>\
 	<p>Mode is %s, boiler heat request is %d, %sforced until %d, %d minutes from now</p> \
-    <p>Target temp %.1f</p> \
+    <p>Target temp %.1f, %sholding off for boiler until %d, %d minutes from now</p> \
     <p><a href=\"/hot\"><button class=\"button\">HOT</button></a>\
     <a href=\"/cold\"><button class=\"button\">COLD</button></a>\
     <a href=\"/forceon\"><button class=\"button\">FORCE 20 min</button></a></p>\
@@ -189,7 +196,7 @@ static void handleRoot() {
 		__DATE__, __TIME__, hr, min % 60, sec % 60, (uint32_t)millis(),
         mode_names[current_mode],
 		boiler_val, (current_mode == FORCED ? "" : "not "), (uint32_t)forced_heating_until, (int)((forced_heating_until - millis()) / 60 / 1000),
-        thermostat_target_temp
+        thermostat_target_temp, ((millis() > holdoff_for_stove_until) ? "not " : ""), holdoff_for_stove_until, (int)((holdoff_for_stove_until - millis()) / 60 / 1000) 
 	);
     websrv.sendContent(tempBuf);
 
@@ -359,6 +366,15 @@ void mqtt_thermometer_cb(const char *topic, const char *payload)
     therm->last_seen = millis();
 }
 
+void mqtt_stovestatus_cb(const char *topic, const char *payload)
+{
+    int new_status = atoi(payload);
+    if (new_status != stove_status) {
+        stove_status = new_status;
+        stove_status_since = millis();
+    }
+}
+
 bool last_seen_too_old(uint32_t last_seen)
 {
     // Boot 
@@ -436,6 +452,61 @@ bool TRV_requires_heat(void)
     return heat;
 }
 
+/* The living room needs to be heated. Do we trigger the stove instead?
+   Wood pellets are cheaper than natural gas so this takes absolute priority if
+   the stove is in a state compatible with being triggered.
+   */
+bool heat_living_with_stove(void)
+{
+/*                '0' : 'Off',
+            '1' : 'OffTimer',
+            '2' : 'TestFire',
+              '3' : 'Heatup',
+              '4' : 'Fueling', <<- this one needs to be avoided see https://github.com/Domochip/WirelessPalaControl/issues/36
+              '5' : 'IGNTEST',
+              '6' : 'BURNING',
+              '9' : 'COOLFLUID',
+             '10' : 'FIRESTOP',
+             '11' : 'CLEANFIRE',
+             '12' : 'COOL',
+            '239' : 'MFDOOR ALARM',
+            '240' : 'FIRE ERROR',
+            '241' : 'CHIMNEY ALARM',
+            '243' : 'GRATE ERROR',
+            '244' : 'NTC2 ALARM',
+            '245' : 'NTC3 ALARM',
+            '247' : 'DOOR ALARM',
+            '248' : 'PRESS ALARM',
+            '249' : 'NTC1 ALARM',
+            '250' : 'TC1 ALARM',
+            '252' : 'GAS ALARM',
+            '253' : 'NOPELLET ALARM'} %}*/
+    bool start_stove = false;
+    switch (stove_status) {
+        case 0:
+        case 1:
+        case 2:
+        case 9:
+            start_stove = true;
+            break;
+    }
+
+    if (millis() < holdoff_for_stove_until) {
+        // Holding off heating, stove is already starting
+        strcat(logStr, "--> holding off for stove");
+        return true;
+    }
+
+    if (start_stove) {
+        mqtt.publish("controlepoele/cmd", "CMD+ON");
+        strcat(logStr, "--> starting stove");
+        holdoff_for_stove_until = millis() + 20 * 60 * 1000;
+        return true;
+    }
+
+    return false;
+}
+
 /* Do temperatures in non-TRV rooms require heat? */
 bool thermostat_requires_heat(void)
 {
@@ -477,7 +548,7 @@ bool thermostat_requires_heat(void)
     if (living_temp > 0 && living_temp < thermostat_target_temp) {
         // XXX add hysteresis
         sprintf(logStr, "Living avg temp %f target %f: requesting heat", living_temp, thermostat_target_temp);
-        return true;
+        return !heat_living_with_stove();
     }
 
     // XXX take exterior temp into account
@@ -558,6 +629,8 @@ void setup ( void ) {
     mqtt.will.qos = 1;
     mqtt.will.retain = true;
 
+    mqtt.subscribe("controlepoele/STATUS", &mqtt_stovestatus_cb);
+
     mqtt.begin();
 
     mqtt.loop();
@@ -589,7 +662,7 @@ void set_boiler(bool val)
     boiler_val = val;
 }
 
-void loop ( void ) {
+void loop (void) {
     ArduinoOTA.handle();
 
     mqtt.loop();
@@ -645,6 +718,5 @@ void loop ( void ) {
         mqtt_publish_target_temp();
 	}
    
-
 	delay(50); // needed to take advantage of modem sleep (70mA -> 50mA)
 }

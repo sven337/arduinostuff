@@ -124,7 +124,6 @@ void setupADC() {
     if (!ads.begin()) {
         Serial.println("Failed to initialize ADS1115");
     }
-//    ads.setGain(GAIN_ONE);
 }
 
 void publishStatus() {
@@ -148,17 +147,14 @@ void publishStatus() {
 }
 
 void read_pH_ORP() {
-    // Read pH from ADS1115 A0
-    /*int16_t adc2 = ads.readADC_SingleEnded(2);
+    // Read pH from ADS1115 A2
+    int16_t adc2 = ads.readADC_SingleEnded(2);
     int16_t adc3 = ads.readADC_SingleEnded(3);
     float v2 = ads.computeVolts(adc2); 
-    float v3 = ads.computeVolts(adc3); */
-    int16_t adc2 = ads.readADC_Differential_2_3();
-    float v2 = ads.computeVolts(adc2); 
-    mqtt.publish("openbopi/ph_volt", String(v2, 3));
-    phValue = 2.4375 + (1.53 - v2) / 0.14; // wtf but this seems to be what bopi does
+    float v3 = ads.computeVolts(adc3); 
+    phValue = 7 + (1.53 - v2) / 0.14; // wtf but that seems to be what bopi does. channel 3 is ignored
     
-    // Read ORP from ADS1115 A1
+    // Read ORP from ADS1115 A0/1
     int16_t adc0 = ads.readADC_Differential_0_1();
     orpValue = ads.computeVolts(adc0) * 1000.0;
 }
@@ -267,6 +263,7 @@ void checkORPRegulation() {
     
     if (phValue > 7.5) {
         mqtt.publish("openbopi/status", "pH too high for chlorine injection: suspected problem");
+        stop_pump(1);
         return;
     }
 
@@ -279,7 +276,7 @@ void checkORPRegulation() {
         !pump_running[1] &&
         (now - last_chlorine_injection) > MIN_INJECTION_INTERVAL) {
        
-        start_pump(0, CHLORINE_INJECTION_TIME);
+        start_pump(1, CHLORINE_INJECTION_TIME);
         mqtt.publish("openbopi/status", "Injecting chlorine");
     }
 }

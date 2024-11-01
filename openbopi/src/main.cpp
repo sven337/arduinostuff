@@ -174,7 +174,9 @@ void read_pH_ORP() {
     int16_t adc3 = ads.readADC_SingleEnded(3);
     float v2 = ads.computeVolts(adc2); 
     float v3 = ads.computeVolts(adc3); 
-    phValue = 7 + (1.53 - v2) / 0.14; // wtf but that seems to be what bopi does. channel 3 is ignored
+    float newPhValue = 7 + (1.53 - v2) / 0.14; // wtf but that seems to be what bopi does. channel 3 is ignored
+    // Filter with EMA 10%, see below for details
+    phValue = (9 * phValue + newPhValue) / 10;
     
     // Read ORP from ADS1115 A0/1
     int16_t adc0 = ads.readADC_Differential_0_1();

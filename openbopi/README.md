@@ -29,7 +29,6 @@ OpenBopi is an open-source replacement firmware for the [BoPi pool controller ha
 
 ### Missing features
 
-- MDNS
 - pH regulation (easy to add)
 - onboard RTC (useless?)
 - relay control (easy to add)

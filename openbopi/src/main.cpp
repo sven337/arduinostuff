@@ -12,6 +12,8 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
+#include <DHT.h>
+
 // Pumps
 const int pump_pins[] = { 32, 33 };
 unsigned long pump_stop_at[2];
@@ -30,6 +32,8 @@ float phValue = 0;
 float orpValue = 0;
 float waterTemp = 0;
 float airTemp = 0;
+float boxTemp = 0;
+float boxHumidity = 0;
 
 float orp_target = 750.0;  // Default ORP target
 bool orp_regulation_enabled = false;
@@ -39,7 +43,11 @@ const unsigned long CHLORINE_INJECTION_TIME = 10;   // 10 seconds injection
     
 unsigned long next_publish_at = 0;
 unsigned long next_read_data_at = 0;
-                                                      //
+
+#define DHTPIN 23
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
 // HTML page
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
@@ -129,8 +137,8 @@ void setupADC() {
 void publishStatus() {
     String status = "{\"ph\":" + String(phValue, 2) + 
                    ",\"orp\":" + String(orpValue, 0) +
-                  ",\"watertemp\":" + String(waterTemp, 2) + 
-                   ",\"airtemp\":" + String(airTemp, 2) +
+                  ",\"watertemp\":" + String(waterTemp, 1) + 
+                   ",\"airtemp\":" + String(airTemp, 1) +
                    ",\"pump1\":" + String(pump_running[0]) +
                    ",\"pump2\":" + String(pump_running[1]) +
                    ",\"orp_regulation\":" + String(orp_regulation_enabled) +
@@ -141,8 +149,10 @@ void publishStatus() {
     mqtt.publish("openbopi/orp_regulation", String(orp_regulation_enabled));
     mqtt.publish("openbopi/pump1", String(pump_running[0]));
     mqtt.publish("openbopi/pump2", String(pump_running[1]));
-    mqtt.publish("openbopi/watertemp", String(waterTemp, 2));
-    mqtt.publish("openbopi/airtemp", String(airTemp, 2));
+    mqtt.publish("openbopi/watertemp", String(waterTemp, 1));
+    mqtt.publish("openbopi/airtemp", String(airTemp, 1));
+    mqtt.publish("openbopi/boxtemp", String(boxTemp, 1));
+    mqtt.publish("openbopi/boxhumidity", String(boxHumidity, 0));
     Serial.println(status);
 }
 
@@ -172,6 +182,21 @@ void readTemperatures() {
         airTemp = -127;
     }
 }
+
+void readDHT11() 
+{
+    float newTemp = dht.readTemperature();
+    float newHumidity = dht.readHumidity();
+    
+    // Only update if readings are valid
+    if (!isnan(newTemp)) {
+        boxTemp = newTemp;
+    }
+    if (!isnan(newHumidity)) {
+        boxHumidity = newHumidity;
+    }
+}
+
 
 void setupTempSensors() {
     tempSensors.begin();
@@ -287,8 +312,8 @@ void setupWebServer() {
         String html = String(index_html);
         html.replace("%PH%", String(phValue, 2));
         html.replace("%ORP%", String(orpValue, 0));
-        html.replace("%WATERTEMP%", String(waterTemp, 2));
-        html.replace("%AIRTEMP%", String(airTemp, 2));
+        html.replace("%WATERTEMP%", String(waterTemp, 1));
+        html.replace("%AIRTEMP%", String(airTemp, 1));
         html.replace("%ORP_REGULATION%", String(orp_regulation_enabled));
         html.replace("%ORP_TARGET%", String(orp_target, 3));
         request->send(200, "text/html", html);
@@ -305,8 +330,8 @@ void setupWebServer() {
     server.on("/values", HTTP_GET, [](AsyncWebServerRequest *request) {
         String json = "{\"ph\":" + String(phValue, 2) + 
                      ",\"orp\":" + String(orpValue, 0) + 
-                     ",\"watertemp\":" + String(waterTemp, 2) + 
-                     ",\"airtemp\":" + String(airTemp, 2) + 
+                     ",\"watertemp\":" + String(waterTemp, 1) + 
+                     ",\"airtemp\":" + String(airTemp, 1) + 
                      "}";
         request->send(200, "application/json", json);
     });
@@ -334,7 +359,8 @@ void setup() {
     pinMode(pump_pins[1], OUTPUT);
     digitalWrite(pump_pins[0], LOW);
     digitalWrite(pump_pins[1], LOW);
-    
+   
+    dht.begin();
     setupWiFi();
     setupOTA();
     setupADC();
@@ -358,6 +384,7 @@ void loop() {
     if (millis() > next_read_data_at) {
         read_pH_ORP();
         readTemperatures();
+        readDHT11();
         next_read_data_at = millis() + 5000;
     }
 

@@ -29,17 +29,18 @@ OpenBopi is an open-source replacement firmware for the [BoPi pool controller ha
 
 ### Missing features
 
+- MDNS
 - pH regulation (easy to add)
 - onboard RTC (useless?)
-- onboard DHT11 (useless?)
 - relay control (easy to add)
+- read/write preferences in SPIFFS
 - add more HW features by hacking on the board, but honestly it's probably better to build this from scratch as the board is not an improvement over the piecewise BOM from [ESP32-PoolMaster](https://github.com/Gixy31/ESP32-PoolMaster/blob/main/BOM.xlsx) as long as you use the same cheap pumps and probes as Bopi does
 
 ## Hardware Details
 
 ### Board Components
-- MCU: ESP32-WROOM-32D
-- Original DHT11 temperature sensor (limited usefulness)
+- MCU: ESP32-WROOM-32D w/ 8MB flash (but this project fits in 4MB)
+- DHT11 temperature sensor (limited usefulness)
 - External DS18B20 temperature sensors on jack connectors (wired incorrectly in original design, causing short circuit on connection, not a big deal but one of the various HW bugs that make me advise not buying this board)
 - Peristaltic pumps: [NKP-DC-B08D (12V, 5W)](https://www.aliexpress.com/i/1005005061256347.html)
 - pH/ORP reading inspired by [pH_Orp_Board](https://github.com/Loic74650/pH_Orp_Board/tree/main)
@@ -54,7 +55,8 @@ OpenBopi is an open-source replacement firmware for the [BoPi pool controller ha
 - GPIO26: Relay 3
 - GPIO25: Relay 4
 - GPIO19: DS18B20 temperature sensors
-- I2C: Default Wire0 pins
+- GPIO23: DHT11
+- I2C on the default Wire0 pins
 
 Note: Relays are inverted (1 = OFF)
 

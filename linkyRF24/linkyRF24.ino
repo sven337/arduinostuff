@@ -82,6 +82,7 @@ HHPHC A ,
 MOTDETAT 000000 B
 
 */
+// XXX add checksum verification
 void send_line()
 {
     // We have four bytes on the air to fit the data. Build packets intelligently.

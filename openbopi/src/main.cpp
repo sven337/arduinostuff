@@ -39,11 +39,14 @@ float boxHumidity = 0;
 float orp_target = 680.0;  // Default ORP target
 bool orp_regulation_enabled = false;
 unsigned long last_chlorine_injection = 0;
-const unsigned long MIN_INJECTION_INTERVAL = 3 * 60 * 1000;  // 3 minutes
+const unsigned long MIN_INJECTION_INTERVAL = 5 * 60 * 1000;  // 5 minutes
 const unsigned long CHLORINE_INJECTION_TIME = 10;   // 10 seconds injection
     
 unsigned long next_publish_at = 0;
 unsigned long next_read_data_at = 0;
+
+unsigned long fast_publish_until = 0;
+unsigned long streaming_enabled_until = 0;
 
 #define DHTPIN 23
 #define DHTTYPE DHT11
@@ -59,9 +62,42 @@ const char index_html[] PROGMEM = R"rawliteral(
         <meta charset="utf-8">
     <style>
         body { font-family: Arial; text-align: center; }
-        .button { background-color: #4CAF50; color: white; padding: 10px 20px; 
-                 border: none; border-radius: 4px; margin: 5px; }
+        .button { 
+            background-color: #4CAF50; 
+            color: white; 
+            padding: 10px 20px; 
+            border: none; 
+            border-radius: 4px; 
+            margin: 5px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .button:hover {
+            background-color: #45a049;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        .button:active {
+            background-color: #3d8b40;
+            transform: translateY(1px);
+            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+        }
         .readings { font-size: 1.2em; margin: 20px; }
+        .status {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+        .status-on {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .status-off {
+            background-color: #f44336;
+            color: white;
+        }
     </style>
 </head>
 <body>
@@ -73,15 +109,23 @@ const char index_html[] PROGMEM = R"rawliteral(
         <p>Air Temperature: <span id="airtemp">%AIRTEMP%</span>°C</p>
         <p>ORP Regulation: <span id="orp_regulation">%ORP_REGULATION%</span></p>
         <p>ORP Target: <input type="number" id="orp_target" value="%ORP_TARGET%" onchange="updateORPTarget(this.value)"> mV</p>
+        <p>Fast Publishing: <span id="fast_publish">%FAST_PUBLISH%</span></p>
+        <p>Streaming Mode: <span id="streaming">%STREAMING%</span></p>
     </div>
-    <button class="button" onclick="toggleORPRegulation()">Toggle ORP Regulation</button>
-    <button class="button" onclick="activatePump(1)">Activate Pump 1 (10s)</button>
-    <button class="button" onclick="activatePump(2)">Activate Pump 2 (10s)</button>
+     <button class="button" onclick="handleButton('/toggle_regulation')">Toggle ORP Regulation</button>
+    <button class="button" onclick="handleButton('/pump?id=1')">Activate Pump 1 (10s)</button>
+    <button class="button" onclick="handleButton('/pump?id=2')">Activate Pump 2 (10s)</button>
+    <button class="button" onclick="handleButton('/fast_publish')">Enable Fast Publishing (60min)</button>
+    <button class="button" onclick="handleButton('/streaming')">Enable Streaming (10min)</button>
     <script>
-        function activatePump(pump) {
-            fetch('/pump?id=' + pump)
+        function handleButton(url) {
+            fetch(url)
                 .then(response => response.text())
-                .then(data => console.log(data));
+                .then(data => {
+                    console.log(data);
+                    setTimeout(() => window.location.reload(), 500);
+                })
+                .catch(error => console.error('Error:', error));
         }
         setInterval(function() {
             fetch('/values')
@@ -95,11 +139,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         }, 5000);
          function updateORPTarget(value) {
             fetch('/orp_target?value=' + value)
-                .then(response => response.text())
-                .then(data => console.log(data));
-        }
-        function toggleORPRegulation() {
-            fetch('/toggle_regulation')
                 .then(response => response.text())
                 .then(data => console.log(data));
         }
@@ -176,7 +215,11 @@ void read_pH_ORP() {
     float v3 = ads.computeVolts(adc3); 
     float newPhValue = 7 + (1.53 - v2) / 0.14; // wtf but that seems to be what bopi does. channel 3 is ignored
     // Filter with EMA 10%, see below for details
-    phValue = (9 * phValue + newPhValue) / 10;
+    if (phValue == 0) {
+        phValue = newPhValue;
+    } else {
+        phValue = (9 * phValue + newPhValue) / 10;
+    }
     
     // Read ORP from ADS1115 A0/1
     int16_t adc0 = ads.readADC_Differential_0_1();
@@ -205,7 +248,17 @@ void read_pH_ORP() {
     // overkill.
     //
     // In my filtering evaluations (see the img/ folder), an exponential moving average actually works better than a median filter (as implemented by PoolMaster) or a winsorized means (as implemented by Bopi). These were done with 25 measurements/sec (streaming as fast as possible).
-    orpValue = (9 * orpValue + newOrpValue) / 10;
+    if (orpValue == 0) {
+        orpValue = newOrpValue;
+    } else {
+        orpValue = (9 * orpValue + newOrpValue) / 10;
+    }
+    
+    if (millis() < streaming_enabled_until) {
+        // Debug code to stream values, for filter tuning
+        mqtt.publish("openbopi/pHstream", String(newPhValue, 2));
+        mqtt.publish("openbopi/ORPstream", String(newOrpValue, 0));
+    }
 }
 
 void readTemperatures() {
@@ -360,6 +413,8 @@ void setupWebServer() {
         html.replace("%AIRTEMP%", String(airTemp, 1));
         html.replace("%ORP_REGULATION%", String(orp_regulation_enabled));
         html.replace("%ORP_TARGET%", String(orp_target, 3));
+        html.replace("%FAST_PUBLISH%", millis() < fast_publish_until ? "ON" : "OFF");
+        html.replace("%STREAMING%", millis() < streaming_enabled_until ? "ON" : "OFF");
         request->send(200, "text/html", html);
     });
 
@@ -390,6 +445,18 @@ void setupWebServer() {
     server.on("/toggle_regulation", HTTP_GET, [](AsyncWebServerRequest *request) {
         toggle_ORP_regulation(!orp_regulation_enabled);
         request->send(200, "text/plain", orp_regulation_enabled ? "ON" : "OFF");
+    });
+
+    server.on("/fast_publish", HTTP_GET, [](AsyncWebServerRequest *request) {
+        fast_publish_until = millis() + 60 * 60 * 1000; // 60 minutes
+        next_publish_at = millis();
+        request->send(200, "text/plain", "Fast publishing enabled");
+    });
+
+    server.on("/streaming", HTTP_GET, [](AsyncWebServerRequest *request) {
+        streaming_enabled_until = millis() + 10 * 60 * 1000; // 10 minutes
+        next_publish_at = millis();
+        request->send(200, "text/plain", "Streaming enabled");
     });
 
     server.begin();
@@ -433,29 +500,45 @@ void setup() {
 void loop() {
     ArduinoOTA.handle();
     mqtt.loop();
+    
+    uint32_t now = millis();
    
     read_pH_ORP();
+    
 
-    if (millis() > next_read_data_at) {
+    if (now > next_read_data_at) {
         readTemperatures();
         readDHT11();
         next_read_data_at = millis() + 5000;
     }
 
-    if (millis() > next_publish_at) {
+    if (now > next_publish_at) {
+#define FAST_PUBLISH_INTERVAL 10 
+#define REGULATION_PUBLISH_INTERVAL 1 * 60
+#define NORMAL_PUBLISH_INTERVAL  10 * 60
+        unsigned long publish_interval;
+        if (now < fast_publish_until) {
+            publish_interval = FAST_PUBLISH_INTERVAL;
+        } else if (orp_regulation_enabled) {
+            publish_interval = REGULATION_PUBLISH_INTERVAL;
+        } else {
+            publish_interval = NORMAL_PUBLISH_INTERVAL;
+        }
+
         publishStatus();
-        next_publish_at = millis() + 5 * 60 * 1000;
+        next_publish_at = now + publish_interval * 1000;
     }
     
     checkORPRegulation();
     checkPumps();
 
-#if 0
-    // Debug code to stream values for filter tuning
-    read_pH_ORP();
-    mqtt.publish("openbopi/pH", String(phValue, 2));
-    mqtt.publish("openbopi/ORP", String(orpValue, 0));
-#endif
+    const unsigned long REBOOT_AT_MILLIS = 4200000000UL;  // Reboot at ~48.6 days, safely before overflow at 49.7 days
+    if (millis() > REBOOT_AT_MILLIS) {
+        Serial.println("Approaching millis() overflow, rebooting...");
+        mqtt.publish("openbopi/status", "Rebooting due to millis() overflow prevention");
+        delay(100);  // Allow time for MQTT message to be sent
+        ESP.restart();
+    }
 
 }
 

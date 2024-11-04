@@ -225,6 +225,20 @@ void read_pH_ORP() {
     int16_t adc0 = ads.readADC_Differential_0_1();
     float newOrpValue = ads.computeVolts(adc0) * 1000.0;
 
+    // Temperature-compensate ORP?
+    // The slope of my ORP probe is -1.34mV/°C
+    // This is significant enough that the setpoint at 15°C and 25°C will
+    // correspond to differing amounts of chlorine, but what is interesting is
+    // that the negative slope means that at lower temperature (where we need
+    // /less/ sanitizer in the water), the ORP value will appear artificially
+    // higher.
+    // Do NOT compensate for temperature for that reason: yes, the ORP value
+    // will appear artificially high at low temps, and artificially low at high
+    // temps, but this is a direction of events which matches what we want to do
+    // anyway (= put more chlorine when the water is hot and there are people
+    // using the pool).
+    // newOrpValue += 1.34 * (20 - waterTemp);
+
     // Filter ORP?
     // PoolMaster averages the 5 middle values in a buffer of 10, but takes 8
     // samples per second.
@@ -247,7 +261,10 @@ void read_pH_ORP() {
     // when you need more at a low duty cycle and you should be good. PID seems
     // overkill.
     //
-    // In my filtering evaluations (see the img/ folder), an exponential moving average actually works better than a median filter (as implemented by PoolMaster) or a winsorized means (as implemented by Bopi). These were done with 25 measurements/sec (streaming as fast as possible).
+    // In my filtering evaluations (see the img/ folder), an exponential moving
+    // average actually works better than a median filter (as implemented by
+    // PoolMaster) or a winsorized means (as implemented by Bopi). These were
+    // done with 25 measurements/sec (streaming as fast as possible).
     if (orpValue == 0) {
         orpValue = newOrpValue;
     } else {

@@ -124,7 +124,7 @@ void handleButtons() {
     }
 }
 
-void pulseUpdate(uint8_t period, bool maxSpeed)
+void pulseUpdate(uint16_t period, bool maxSpeed)
 {
     uint8_t pwm = maxPWM;
     if (maxSpeed) {
@@ -155,14 +155,7 @@ void updateVibration() {
       break;
       
     case FAST_PULSE:
-      if ((millis() - lastPatternUpdate) > 75) {
-          currentPWM = currentPWM > 0 ? 0 : maxPWM;
-          Serial.println(currentPWM);
-          analogWrite(MOTOR_PIN, currentPWM);
-          analogWrite(LED_PIN, 255 - currentPWM);
-          lastPatternUpdate = millis();
-      }
-//      pulseUpdate(75, &lastPatternUpdate, false);
+      pulseUpdate(75, false);
       break;
       
     case SLOW_PULSE:
@@ -171,7 +164,7 @@ void updateVibration() {
     
     case ADJUSTABLE_PULSE: 
       // Adjust pulse *speed* with PWM settings, at max PWM
-      pulseUpdate(map(maxPWM, 255, MIN_PWM, 0, 255), true);
+      pulseUpdate(map(maxPWM, 255, MIN_PWM, 10, 400), true);
       break;
       
     case RAMP:  // Ramp
@@ -245,6 +238,9 @@ TCCR2B = TCCR2B & B11111000 | B00000100; // 490.20 Hz (default)
   pinMode(BTN_PLUS, INPUT_PULLUP);
   pinMode(BTN_MINUS, INPUT_PULLUP);
   pinMode(PWR_BTN, INPUT_PULLUP);
+
+  digitalWrite(MOTOR_PIN, 0);
+  digitalWrite(LED_PIN, 1);
   
   Serial.println("Device initialized");
  

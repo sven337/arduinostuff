@@ -26,6 +26,7 @@ enum mode {
     SLOW_PULSE = 3,
     RAMP = 4,
     ADJUSTABLE_PULSE = 5,
+    PULSETRAIN = 6,
 
     NUM_MODES,
 } currentMode;
@@ -142,6 +143,8 @@ void pulseUpdate(uint16_t period, bool maxSpeed)
 void updateVibration() {
   static bool rampingUp = true;
   static uint32_t holdingRampTill = 0;;
+  static bool inBurstPhase = true;
+  static int pulseCount = 0;
 
   switch (currentMode) {
     case OFF:
@@ -192,6 +195,32 @@ void updateVibration() {
               Serial.println(currentPWM);
           }
       }
+      break;
+    case PULSETRAIN: // short pulses followed by a continuous wave
+        if (inBurstPhase) {
+                if (millis() - lastPatternUpdate > 100) {
+                    currentPWM = currentPWM > 0 ? 0 : maxPWM;
+                    analogWrite(MOTOR_PIN, currentPWM);
+                    analogWrite(LED_PIN, 255 - currentPWM);
+                    lastPatternUpdate = millis();
+                    
+                    if (currentPWM == 0) {
+                        pulseCount++;
+                        if (pulseCount >= 10) {
+                            pulseCount = 0;
+                            inBurstPhase = false;
+                            lastPatternUpdate = millis();
+                        }
+                    }
+                }
+            } else {
+                analogWrite(MOTOR_PIN, maxPWM);
+                analogWrite(LED_PIN, 255 - maxPWM);
+                if (millis() - lastPatternUpdate > 2000) {
+                    inBurstPhase = true;
+                    lastPatternUpdate = millis();
+                }
+            }
       break;
   }
 

@@ -3,7 +3,7 @@
 #include <PinChangeInterrupt.h>
 
 const uint8_t MOTOR_PIN = 10;
-const uint8_t LED_PIN = 11;
+const uint8_t LED_PIN = 11; // Both the battery charging circuit and this MCU try to drive this pin...
 const uint8_t PWR_BTN = 12; // not ideal, should use an interrupt-capable pin
 const uint8_t BTN_PLUS = 9;
 const uint8_t BTN_MINUS = 13;
@@ -227,6 +227,8 @@ void updateVibration() {
 }
 
 void enterSleep() {
+    digitalWrite(LED_PIN, 1);
+    pinMode(LED_PIN, INPUT);
     Serial.println("going to sleep");
     delay(500);
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
@@ -239,6 +241,7 @@ void powerBtnISR() {
     Serial.println("PwrBTN ISR");
     if (currentMode == OFF) {
         currentMode = CONSTANT;
+        pinMode(LED_PIN, OUTPUT);
         Serial.println("Turning on");
         ignorePowerPress = true;
     }

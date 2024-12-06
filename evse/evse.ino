@@ -214,6 +214,8 @@ bit6-bit15: reserved*/
     uint16_t reg2017;         // 2017
 } evseRegs;
 
+struct EvseRegisters oldEvseRegs;
+
 bool readEvseRegisters() {
     uint8_t result;
     static uint8_t count = 0;
@@ -225,7 +227,9 @@ bool readEvseRegisters() {
         Serial.printf("Error reading registers 1000-1010: %d\n", result);
         return false;
     }
-    
+
+    oldEvseRegs = evseRegs;
+
     // Store 1000-series registers
     evseRegs.currentConfig = evse.getResponseBuffer(0);
     evseRegs.currentOutput = evse.getResponseBuffer(1);
@@ -266,6 +270,9 @@ bool readEvseRegisters() {
     evseRegs.reg2016 = evse.getResponseBuffer(16);
     evseRegs.reg2017 = evse.getResponseBuffer(17);
 
+/*    if (memcmp(&evseRegs, &oldEvseRegs, sizeof(oldEvseRegs))) {
+        next_publish_at = millis();
+    }*/
     uint16_t sum = evseRegs.currentConfig + evseRegs.currentOutput + evseRegs.vehicleState + evseRegs.control + evseRegs.evseState + evseRegs.config;
     if (sum != last_sum) {
         // If "important" registers have changed values, report right away
@@ -326,9 +333,30 @@ void setupMQTT() {
     
     mqtt.subscribe(MQTT_TOPIC_ADPS, [](const char* payload) {
         if (strcmp(payload, "1") == 0) {
+            mqtt.publish("svevse/log", "ADPS, stopping charge");
             adpsStopUntil = millis() + 1200000; // 20 minutes
             stopCharging();
         }
+    });
+
+    mqtt.subscribe("edf/PTEC", [](const char *payload) {
+            static uint8_t last_period_type = 0;
+            char period = payload[0];
+
+            if (period == last_period_type) {
+                return;
+            }
+
+            last_period_type = period;
+
+            /* PJB PJR PJW, CJB CJR CJW */
+            if (period == 'C') {
+                mqtt.publish("svevse/log", "Entering Heure Creuse, starting charge");
+                startCharging();
+            } else {
+                mqtt.publish("svevse/log", "Leaving Heure Creuse, stopping charge");
+                stopCharging();
+            }
     });
 
     mqtt.begin();
@@ -388,6 +416,10 @@ bit15: enable bootloader mode (write 32768)*/
 }
 
 bool startCharging() {
+    if (millis() < adpsStopUntil) {
+        return false;
+    }
+
     writeRegister(1004, 0);
     writeConfigBit(13);
     charging = true;
@@ -396,13 +428,14 @@ bool startCharging() {
 }
 
 bool stopCharging() {
-    writeConfigBit(14);
 
 /*    bit0: turn off charging now
 bit1: run selftest and RCD test procedure (approx 30s)
 bit2: clear RCD error
 bit3 - bit15: not used*/
     writeRegister(1004, 1);
+
+    writeConfigBit(14);
     charging = false;
     Serial.println("Charging stopped");
     return true;
@@ -615,11 +648,14 @@ void publishStatus() {
     }
     
     statusString += " - RelayState " + String(evseRegs.rcdStatus & 1);
-    mqtt.publish("svevse/statusString", statusString);
+    mqtt.publish("svevse/status_string", statusString);
 
+    // Default safety values: boot current 8A, max cable 10A
     writeRegister(2000, 8);
-    writeRegister(2002, 5);
     writeRegister(2007, 10);
+
+    // Minimal current for this car is 5A
+    writeRegister(2002, 5);
 }
 
 void loop() {
@@ -629,14 +665,13 @@ void loop() {
    
     static uint32_t last_read_regs = 0;
 
-    if (!last_read_regs || millis() - last_read_regs > 5000) {
+    if (!last_read_regs || millis() - last_read_regs > 250) {
         readEvseRegisters();
         last_read_regs = millis();
     }
 
     // Regular status updates
     if (millis() > next_publish_at) {
-        readEvseRegisters();
         publishStatus();
         next_publish_at = millis() + 3 * 60000;
     }

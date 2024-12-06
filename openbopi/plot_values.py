@@ -7,9 +7,9 @@ from datetime import datetime
 # Read the file with custom parsing
 def parse_line(line):
     parts = line.strip().split()
-    timestamp = ' '.join(parts[:2])
-    sensor = parts[2].split('/')[1]
-    value = float(parts[3])
+    timestamp = datetime.strptime(' '.join(parts[:3]), '%b %d %H:%M:%S.%f')
+    sensor = parts[3].split('/')[1]
+    value = float(parts[4])
     return timestamp, sensor, value
 
 # Read the file and create lists for DataFrame

@@ -16,6 +16,10 @@ SoftwareSerial s8Serial(D1, D2); // RX, TX
 ModbusMaster s8modbus;
 
 int last_co2_value;
+unsigned long lastCo2ReadTime = 0;
+const unsigned long READ_INTERVAL = 15000;  // 15 seconds
+        
+unsigned long publishStaticRegsAt = 0;
 
 void setupOTA() {
     // Port defaults to 8266
@@ -23,6 +27,7 @@ void setupOTA() {
     
     // Set hostname for easy identification
     ArduinoOTA.setHostname("co2sensor");
+    ArduinoOTA.setPassword("co2");
     
     ArduinoOTA.onStart([]() {
         String type;
@@ -70,6 +75,7 @@ void setupWebServer()
 {
     server.on("/", HTTP_GET, []() {
             server.send(200, "text/plain", String(last_co2_value)); });
+    server.begin();
 }
 
 void setup() {
@@ -95,26 +101,65 @@ void setup() {
   setupWebServer();
 }
 
+void readStaticRegisters() 
+{
+    uint16_t sensorTypeIdHigh, sensorTypeIdLow, memoryMapVersion, firmwareVersion, sensorIdHigh, sensorIdLow, abcPeriod;
+
+    if (s8modbus.readInputRegisters(0, 1) == s8modbus.ku8MBSuccess) {
+        uint16_t status = s8modbus.getResponseBuffer(0);
+        mqtt.publish("co2sensor/meter_status", String(status));
+    }
+    
+    // Read input registers starting at reg IR26
+    if (s8modbus.readInputRegisters(25, 6) == s8modbus.ku8MBSuccess) {
+        sensorTypeIdHigh = s8modbus.getResponseBuffer(0);
+        sensorTypeIdLow = s8modbus.getResponseBuffer(1);
+        mqtt.publish("co2sensor/sensor_type", String(sensorTypeIdHigh << 16 | sensorTypeIdLow));
+        memoryMapVersion = s8modbus.getResponseBuffer(2);
+        mqtt.publish("co2sensor/memory_map_version", String(memoryMapVersion));
+        firmwareVersion = s8modbus.getResponseBuffer(3);
+        mqtt.publish("co2sensor/firmware", 
+            String(firmwareVersion >> 8) + "." + String(firmwareVersion & 0xFF));
+        sensorIdHigh = s8modbus.getResponseBuffer(4);
+        sensorIdLow = s8modbus.getResponseBuffer(5);
+        mqtt.publish("co2sensor/sensor_id", String(sensorIdHigh << 16 | sensorIdLow));
+    }
+    
+    // Read ABC Period (HR32)
+    if (s8modbus.readHoldingRegisters(0x001F, 1) == s8modbus.ku8MBSuccess) {
+        abcPeriod = s8modbus.getResponseBuffer(0);
+        mqtt.publish("co2sensor/abc_period", String(abcPeriod));
+    }
+}
+
 void loop() {
     ArduinoOTA.handle();
     mqtt.loop();
     server.handleClient();
 
     // https://rmtplusstoragesenseair.blob.core.windows.net/docs/Dev/publicerat/TDE2067.pdf
-      // Read CO2 value using Modbus function 0x04 (Read Input Registers)
-    uint8_t result = s8modbus.readInputRegisters(0x0003, 1);
-    
-    if (result == s8modbus.ku8MBSuccess) {
-        int co2 = s8modbus.getResponseBuffer(0);
-        Serial.print("CO2 concentration: ");
-        Serial.print(co2);
-        Serial.println(" ppm");
-        mqtt.publish("co2sensor/ppm", String(co2));
-        last_co2_value = co2;
-    } else {
-        Serial.print("Error reading CO2: ");
-        Serial.println(result);
+    // Read CO2 value in IR4
+    unsigned long currentTime = millis();
+    if (currentTime - lastCo2ReadTime >= READ_INTERVAL) {
+        uint8_t result = s8modbus.readInputRegisters(0x0003, 1);
+
+        if (result == s8modbus.ku8MBSuccess) {
+            int co2 = s8modbus.getResponseBuffer(0);
+            Serial.print("CO2 concentration: ");
+            Serial.print(co2);
+            Serial.println(" ppm");
+            mqtt.publish("co2sensor/ppm", String(co2));
+            last_co2_value = co2;
+        } else {
+            Serial.print("Error reading CO2: ");
+            Serial.println(result);
+        }
+
+        lastCo2ReadTime = currentTime;
     }
-        
-  delay(10000);
+
+    if (millis() > publishStaticRegsAt) {
+        readStaticRegisters();
+        publishStaticRegsAt = millis() + 60000 * 60;  // Every hour
+    }
 }

@@ -14,6 +14,10 @@ PicoMQTT::Client mqtt(MQTT_IP, 1883, "triac_heat", MQTT_USER, MQTT_PASS);
 const unsigned long PERIOD_US = 250 * 1000;
 const long DUTY_POINTS_TOTAL = PERIOD_US / 10000; // There are 100 half waves per second, one per 10ms. How many half-waves are there per period? This tells us our operating range in points (not watts) and granularity
 
+// This heater has 3 maximum power settings, 600, 900 and 1500W. Determine
+// which mode we are running in based on live consumption feedback. 
+float radiator_max_power = 600;
+float radiator_calculated_max_power = 600;
 
 int duty_points; // How many half-waves to let through
 uint32_t last_duty_change;
@@ -21,6 +25,8 @@ uint32_t last_duty_change;
 unsigned long next_publish_at = 0;
 bool ssrState;
 bool linky_sees_injection;
+
+unsigned long forced_mode_until = 0;
 
 void setupOTA() {
     // Port defaults to 8266
@@ -77,14 +83,14 @@ float watts_to_duty_points(float w)
     // Duty points are number of half waves per period. Convert a watt figure
     // into that. Use float return so that the caller can floorf/ceilf based on
     // requirements.
-    float maxPower = 600; // 600W is the maximum power of the heater, XXX improve that based on live feedback
-    if (w > maxPower) {
+   
+    if (w > radiator_max_power) {
         return DUTY_POINTS_TOTAL;
     } else if (w <= 0) {
         return 0;
     }
 
-    return (w / maxPower) * DUTY_POINTS_TOTAL;
+    return (w / radiator_max_power) * DUTY_POINTS_TOTAL;
 }
 
 // Set the duty points, ensuring that it is within the valid range
@@ -115,6 +121,11 @@ void PAPP_cb(const char *topic, const char *payload)
     // injecting, no doubt in order to make it easy for us to consume our
     // surplus
 
+    if (millis() < forced_mode_until) {
+        // Forced mode active, ignore
+        return;
+    }
+
     int PAPP = atoi(payload);
     if (PAPP == 0) {
         linky_sees_injection = true;
@@ -140,6 +151,12 @@ void PVprod_cb(const char *topic, const char *payload)
     (void) topic;
     // Notification from inverter of amount of solar energy being produced.
     // This sets a hard cap on how much to consume.
+
+    if (millis() < forced_mode_until) {
+        // Forced mode is active, ignore
+        return;
+    }
+
     int PVprod = atoi(payload);
     int max_duty = floorf(watts_to_duty_points(PVprod));
 
@@ -154,6 +171,11 @@ void netpower_cb(const char *topic, const char *payload)
 {
     (void) topic;
     static uint32_t last_called;
+
+    if (millis() < forced_mode_until) {
+        // Forced mode is active, ignore consumption reports
+        return;
+    }
 
     if (millis() - last_called < 10*1000) {
         // There are redundant calls because Z2M sucks and reports the same
@@ -174,8 +196,18 @@ void netpower_cb(const char *topic, const char *payload)
         return;
     }
 
+    if (-netpower < 50) {
+        // Do not increase consumption if we're injecting less than 50W.
+        return;
+    }
+
+    if (millis() - last_duty_change < 15 * 1000) {
+        // Do not increase consumption if the last duty cycle change was less than 15 seconds ago
+        return;
+    }
+
     // How much to increase the power consumption of the heater? 
-    int increase = floorf(watts_to_duty_points(-netpower));
+    int increase = floorf(watts_to_duty_points(-netpower)) - 1;
 
     // Do not increase by more than 200W increments
     if (increase > watts_to_duty_points(200)) {
@@ -183,17 +215,18 @@ void netpower_cb(const char *topic, const char *payload)
     }
 
     if (increase > 0) {
-        mqtt.publish("triac_heat/log", String("Injecting ") + String(-netpower) + String("W, increasing consumption"));
-        set_duty_points(duty_points + increase);
+        // set_duty_points may do nothing if already at max power
+        if (set_duty_points(duty_points + increase)) {
+            mqtt.publish("triac_heat/log", String("Injecting ") + String(-netpower) + String("W, increasing consumption"));
+        }
     }
 }
 
 void myconsumption_cb(const char *topic, const char *payload) 
 {
-    // Notification from smart plug of current power consumption of the heater.
-
     (void) topic;
 
+    // Notification from smart plug of current power consumption of the heater.
     if (millis() - last_duty_change < 10000) {
         // If we get a consumption report less than 10 seconds after changing duty cycle, ignore it, it is going to be outdated/incorrect.
         return;
@@ -201,10 +234,30 @@ void myconsumption_cb(const char *topic, const char *payload)
 
     // This is a sanity check from theoretical calculation of duty_points/DUTY_POINTS_TOTAL * 600W (depends on the setting of the heater).
     float myconsumption = atof(payload);
+    if (myconsumption == 0.0) {
+        // The thermostat on the radiator is off: this is unavoidable and expected behavior
+        return;
+    }
+
+    // Exponential moving average of the heater's consumption. This is used to estimate its power setting.
+    // Current max consumption is
+    radiator_calculated_max_power *= 7;
+    radiator_calculated_max_power += myconsumption * DUTY_POINTS_TOTAL / duty_points;
+    radiator_calculated_max_power /= 8;
+    if (fabsf(radiator_calculated_max_power - 600) < 50) {
+        radiator_max_power = 600;
+    } else if (fabsf(radiator_calculated_max_power - 900) < 50) {
+        radiator_max_power = 900;
+    } else if (fabsf(radiator_calculated_max_power - 1500) < 50) {
+        radiator_max_power = 1500;
+    } else {
+        mqtt.publish("triac_heat/log", String("Heater max power calculated to be  ") + String(radiator_calculated_max_power) + String(" does not match any allowed value (600, 900, 1500) "));
+    }
+
     int expected_dutypoints = watts_to_duty_points(myconsumption);
 
     if (abs(expected_dutypoints - duty_points) > 1) {
-        mqtt.publish("triac_heat/log", String("Heater consumption ") + String(myconsumption) + String(" does not match expected consumption ") + String(duty_points * 600 / DUTY_POINTS_TOTAL));
+        mqtt.publish("triac_heat/log", String("Heater consumption ") + String(myconsumption) + String(" does not match expected consumption ") + String(radiator_max_power * 600 / DUTY_POINTS_TOTAL));
     }
 }
 
@@ -226,13 +279,25 @@ void setupMQTT()
 
 void setupWebServer() {
   server.on("/", HTTP_GET, []() {
-    String html = "<html><head><title>Heater triac control></title></head><body>";
+    String html = "<html><head><title>Heater triac control</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "</head><body>";
     html += "<h1>SSR Control</h1>";
+    
+    if (millis() < forced_mode_until) {
+      unsigned long remaining = (forced_mode_until - millis()) / 60000;
+      html += "<p style='color: red'>Forced mode active for " + String(remaining) + " more minutes</p>";
+    }
+    
     html += "<p>Current duty points: " + String(duty_points) + "/" + String(DUTY_POINTS_TOTAL) + "</p>";
+    
+    // Single form for both duty setting and force mode
     html += "<form method='POST' action='/setduty'>";
     html += "<input type='number' step='1' min='0' max='" + String(DUTY_POINTS_TOTAL) + "' name='duty'>";
     html += "<input type='submit' value='Set'>";
+    html += "<input type='submit' name='force' value='Force for 20 minutes'>";
     html += "</form></body></html>";
+    
     server.send(200, "text/html", html);
   });
   
@@ -240,6 +305,12 @@ void setupWebServer() {
     if (server.hasArg("duty")) {
         int newDuty = server.arg("duty").toInt();
         set_duty_points(newDuty);
+        
+        // If force button was pressed, also set the timer
+        if (server.hasArg("force")) {
+            forced_mode_until = millis() + (20 * 60 * 1000);
+            mqtt.publish("triac_heat/log", "Forced mode active for 20 minutes");
+        }
     }
     server.sendHeader("Location", "/");
     server.send(302);
@@ -316,6 +387,15 @@ void loop() {
     if (millis() > next_publish_at) {
         publishStatus();
         next_publish_at = millis() + 15 * 60000;
+    }
+
+    // If uptime exceeds 45 days, reboot to prevent overflows
+    if (millis() > 45 * 24 * 60 * 60 * 1000UL) {
+        mqtt.publish("triac_heat/log", "Rebooting to prevent overflow");
+        // Perform any cleanup needed
+        WiFi.disconnect();
+        delay(100);
+        ESP.restart();
     }
 }
 

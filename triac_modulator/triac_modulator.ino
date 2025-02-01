@@ -239,26 +239,35 @@ void myconsumption_cb(const char *topic, const char *payload)
         return;
     }
 
-    // Exponential moving average of the heater's consumption. This is used to estimate its power setting.
-    // Current max consumption is
-    radiator_calculated_max_power *= 7;
-    radiator_calculated_max_power += myconsumption * DUTY_POINTS_TOTAL / duty_points;
-    radiator_calculated_max_power /= 8;
-    if (fabsf(radiator_calculated_max_power - 600) < 50) {
-        radiator_max_power = 600;
-    } else if (fabsf(radiator_calculated_max_power - 900) < 50) {
-        radiator_max_power = 900;
-    } else if (fabsf(radiator_calculated_max_power - 1500) < 50) {
-        radiator_max_power = 1500;
-    } else {
-        mqtt.publish("triac_heat/log", String("Heater max power calculated to be  ") + String(radiator_calculated_max_power) + String(" does not match any allowed value (600, 900, 1500) "));
-    }
-
     int expected_dutypoints = watts_to_duty_points(myconsumption);
 
     if (abs(expected_dutypoints - duty_points) > 1) {
         mqtt.publish("triac_heat/log", String("Heater consumption ") + String(myconsumption) + String(" does not match expected consumption ") + String(radiator_max_power * 600 / DUTY_POINTS_TOTAL));
     }
+
+    if (duty_points == 0) {
+        return;
+    }
+
+    // Exponential moving average of the heater's consumption. This is used to estimate its power setting.
+    float old_max_power = radiator_max_power;
+    radiator_calculated_max_power *= 3;
+    radiator_calculated_max_power += myconsumption * DUTY_POINTS_TOTAL / duty_points;
+    radiator_calculated_max_power /= 4;
+    if (fabsf(radiator_calculated_max_power - 600) < 60) {
+        radiator_max_power = 600;
+    } else if (fabsf(radiator_calculated_max_power - 900) < 90) {
+        radiator_max_power = 900;
+    } else if (fabsf(radiator_calculated_max_power - 1500) < 150) {
+        radiator_max_power = 1500;
+    } else {
+        mqtt.publish("triac_heat/log", String("Heater max power calculated to be ") + String(radiator_calculated_max_power) + String(" does not match any allowed value (600, 900, 1500) "));
+    }
+
+    if (radiator_max_power != old_max_power) {
+        mqtt.publish("triac_heat/log", String("Heater max power detected to be ") + String(radiator_max_power) + String("W, calculated to be ") + String(radiator_calculated_max_power) + String("W"));
+    }
+
 }
 
 void setupMQTT() 

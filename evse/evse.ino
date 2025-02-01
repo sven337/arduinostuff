@@ -14,6 +14,7 @@
 const char* MQTT_TOPIC_SET_CURRENT = "svevse/set_charge_current";
 const char* MQTT_TOPIC_ENABLE = "svevse/enable_charge";
 const char* MQTT_TOPIC_ADPS = "edf/ADPS";
+const char* MQTT_TOPIC_PAPP = "edf/PAPP";
 
 // Global variables
 ModbusMaster evse;
@@ -24,6 +25,9 @@ PicoMQTT::Client mqtt(MQTT_IP);
 uint32_t adpsStopUntil = 0;
 uint32_t next_publish_at = 0;
 bool charging = false;
+float maxCurrent;
+bool throttlingCurrent;
+uint32_t throttling_current_until = 0;
 
 // HTML template
 const char INDEX_HTML[] PROGMEM = R"=====(
@@ -111,8 +115,8 @@ const char INDEX_HTML[] PROGMEM = R"=====(
     <td>%EVSE_STATE%</td>
   </tr>
   <tr>
-    <td>2000 Max Current</td>
-    <td>%MAX_CURRENT% A</td>
+    <td>2000 Current at boot</td>
+    <td>%BOOT_CURRENT% A</td>
   </tr>
   <tr>
     <td>2005 Config</td>
@@ -164,7 +168,20 @@ const char INDEX_HTML[] PROGMEM = R"=====(
 </html>
 )=====";
 
-// Add register definitions
+enum VEHICLE_STATE {
+    VEHICLE_EVSE_READY = 1,
+    VEHICLE_EV_PRESENT = 2,
+    VEHICLE_CHARGING = 3,
+    VEHICLE_CHARGING_VENTILATION = 4,
+    VEHICLE_FAILURE = 5
+};
+
+enum EVSE_STATE {
+    EVSE_STEADY_12V = 1,
+    EVSE_PWM = 2,
+    EVSE_OFF = 3
+};
+
 struct EvseRegisters {
     // 1000-series registers
     uint16_t currentConfig;    // 1000 - Configured current
@@ -270,9 +287,6 @@ bool readEvseRegisters() {
     evseRegs.reg2016 = evse.getResponseBuffer(16);
     evseRegs.reg2017 = evse.getResponseBuffer(17);
 
-/*    if (memcmp(&evseRegs, &oldEvseRegs, sizeof(oldEvseRegs))) {
-        next_publish_at = millis();
-    }*/
     uint16_t sum = evseRegs.currentConfig + evseRegs.currentOutput + evseRegs.vehicleState + evseRegs.control + evseRegs.evseState + evseRegs.config;
     if (sum != last_sum) {
         // If "important" registers have changed values, report right away
@@ -327,7 +341,9 @@ void setupMQTT() {
     });
     
     mqtt.subscribe(MQTT_TOPIC_SET_CURRENT, [](const char* payload) {
-        int current = 100 * atof(payload);
+        float val = atof(payload);
+        int current = 100 * val;
+        maxCurrent = val;
         setChargeCurrent(current);
     });
     
@@ -338,10 +354,53 @@ void setupMQTT() {
             stopCharging();
         }
     });
+    
+    mqtt.subscribe(MQTT_TOPIC_PAPP, [](const char* payload) {
+        int val = atoi(payload);
+        
+        if (val < 0 || val > 10000) {
+            return;
+        }
+        
+        float headRoom = 6900 - val;
+        if (headRoom > 500) {
+            // Got enough headroom, no need to throttle
+            if (throttlingCurrent && millis() > throttling_current_until) {
+                mqtt.publish("svevse/log", "PAPP: Enough headroom, restoring max current");
+                setChargeCurrent(100 * maxCurrent);
+                throttlingCurrent = false;
+            }
+            return;
+        }
+
+        if (maxCurrent <= 5.5) {
+            // Can't throttle own current below 5.5A
+            return;
+        }
+
+        float freeUp = 500 - headRoom;
+        float newAmps = maxCurrent - freeUp / 230;
+        if (newAmps < 5.5) {
+            newAmps = 5.5;
+        }
+        char log[255];
+        snprintf(log, 255, "PAPP: %d, headroom %f, throttling to %.1fA to leave 500VA of headroom", val, headRoom, newAmps);
+        mqtt.publish("svevse/log", log);
+        setChargeCurrent(100 * newAmps);
+        throttlingCurrent = true;
+        throttling_current_until = millis() + 10 * 60 * 1000; // 10 minutes
+
+    });
 
     mqtt.subscribe("edf/PTEC", [](const char *payload) {
             static uint8_t last_period_type = 0;
             char period = payload[0];
+
+            // Block charging in PJR. Partially redundant with the below, but I've had misses
+            if (charging && !strcmp(payload, "PJR")) {
+                mqtt.publish("svevse/log", "In PJR, stopping charge");
+                stopCharging();
+            }
 
             if (period == last_period_type) {
                 return;
@@ -353,9 +412,11 @@ void setupMQTT() {
             if (period == 'C') {
                 mqtt.publish("svevse/log", "Entering Heure Creuse, starting charge");
                 startCharging();
-            } else {
+                return;
+            } else if (last_period_type == 'C') {
                 mqtt.publish("svevse/log", "Leaving Heure Creuse, stopping charge");
                 stopCharging();
+                return;
             }
     });
 
@@ -466,7 +527,7 @@ void setupWebServer() {
         html.replace("%REG1008%", String(evseRegs.reg1008, HEX));
         html.replace("%REG1009%", String(evseRegs.reg1009, HEX));
         html.replace("%REG1010%", String(evseRegs.reg1010, HEX));
-        html.replace("%MAX_CURRENT%", String(evseRegs.bootDefaultAmps));
+        html.replace("%BOOT_CURRENT%", String(evseRegs.bootDefaultAmps));
         html.replace("%MODBUS_ADDR%", String(evseRegs.modbusAddr));
         html.replace("%MIN_CURRENT%", String(evseRegs.minCurrent));
         html.replace("%ANALOG_INPUT%", String(evseRegs.analogInput, HEX));
@@ -589,7 +650,6 @@ void setup() {
     Serial.begin(115200);
     evseSerial.begin(9600);
     evse.begin(1, evseSerial);
-   
     Serial.println("Hello from Svenvse");
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
@@ -602,29 +662,40 @@ void setup() {
     setupOTA();
     setupMQTT();
     setupWebServer();
+
+    // Default safety values: boot current 8A, max cable 12A
+    writeRegister(2000, 8);
+    writeRegister(2007, 12);
+    maxCurrent = 8;
+
+    // Minimal current for this car is 5A
+    writeRegister(2002, 5);
+   
+    startCharging();
 }
 
 void publishStatus() {
     mqtt.publish("svevse/vehicle_state", String(evseRegs.vehicleState));
     mqtt.publish("svevse/current_output", String(evseRegs.currentOutput / 100.));
     mqtt.publish("svevse/evse_state", String(evseRegs.evseState));
+    mqtt.publish("svevse/relay_state", String(evseRegs.rcdStatus & 1));
     mqtt.publish("svevse/charging", charging ? "1" : "0");
 
     String statusString = "VehicleState ";
     switch (evseRegs.vehicleState) {
-        case 1: 
-            statusString += "ready";
+        case VEHICLE_EVSE_READY: 
+            statusString += "evse_ready";
             break;
-        case 2:
+        case VEHICLE_EV_PRESENT:
             statusString += "present";
             break;
-        case 3:
+        case VEHICLE_CHARGING:
             statusString += "charging";
             break;
-        case 4:
+        case VEHICLE_CHARGING_VENTILATION:
             statusString += "chargingWithVentilation";
             break;
-        case 5:
+        case VEHICLE_FAILURE:
             statusString += "error";
             break;
         default:
@@ -633,13 +704,13 @@ void publishStatus() {
 
     statusString += " - EVSEState ";
     switch (evseRegs.evseState) {
-        case 1:
+        case EVSE_STEADY_12V:
             statusString += "Steady12V";
             break;
-            case 2:
+        case EVSE_PWM:
             statusString += "PWM";
             break;
-            case 3:
+        case EVSE_OFF:
             statusString += "OFF";
             break;
 
@@ -649,13 +720,6 @@ void publishStatus() {
     
     statusString += " - RelayState " + String(evseRegs.rcdStatus & 1);
     mqtt.publish("svevse/status_string", statusString);
-
-    // Default safety values: boot current 8A, max cable 10A
-    writeRegister(2000, 8);
-    writeRegister(2007, 10);
-
-    // Minimal current for this car is 5A
-    writeRegister(2002, 5);
 }
 
 void loop() {
@@ -668,6 +732,11 @@ void loop() {
     if (!last_read_regs || millis() - last_read_regs > 250) {
         readEvseRegisters();
         last_read_regs = millis();
+    }
+
+    // State transition: an EV was just plugged in, start charge
+    if (evseRegs.vehicleState == VEHICLE_EV_PRESENT && oldEvseRegs.vehicleState == VEHICLE_EVSE_READY) {
+        startCharging();
     }
 
     // Regular status updates

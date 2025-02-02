@@ -227,8 +227,8 @@ void myconsumption_cb(const char *topic, const char *payload)
     (void) topic;
 
     // Notification from smart plug of current power consumption of the heater.
-    if (millis() - last_duty_change < 10000) {
-        // If we get a consumption report less than 10 seconds after changing duty cycle, ignore it, it is going to be outdated/incorrect.
+    if (millis() - last_duty_change < 15000) {
+        // If we get a consumption report less than 15 seconds after changing duty cycle, ignore it, it is going to be outdated/incorrect.
         return;
     }
 
@@ -242,7 +242,7 @@ void myconsumption_cb(const char *topic, const char *payload)
     int expected_dutypoints = watts_to_duty_points(myconsumption);
 
     if (abs(expected_dutypoints - duty_points) > 1) {
-        mqtt.publish("triac_heat/log", String("Heater consumption ") + String(myconsumption) + String(" does not match expected consumption ") + String(radiator_max_power * 600 / DUTY_POINTS_TOTAL));
+        mqtt.publish("triac_heat/log", String("Heater consumption ") + String(myconsumption) + String(" does not match expected consumption ") + String(radiator_max_power * duty_points / DUTY_POINTS_TOTAL));
     }
 
     if (duty_points == 0) {
@@ -299,6 +299,7 @@ void setupWebServer() {
     }
     
     html += "<p>Current duty points: " + String(duty_points) + "/" + String(DUTY_POINTS_TOTAL) + "</p>";
+    html += "<p>Detected radiator max power: " + String(radiator_max_power) + "</p><p>Current power draw: " + String(duty_points * radiator_max_power / DUTY_POINTS_TOTAL) + "W</p>";
     
     // Single form for both duty setting and force mode
     html += "<form method='POST' action='/setduty'>";

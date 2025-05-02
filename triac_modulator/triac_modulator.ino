@@ -14,6 +14,17 @@ PicoMQTT::Client mqtt(MQTT_IP, 1883, "triac_heat", MQTT_USER, MQTT_PASS);
 const unsigned long PERIOD_US = 250 * 1000;
 const long DUTY_POINTS_TOTAL = PERIOD_US / 10000; // There are 100 half waves per second, one per 10ms. How many half-waves are there per period? This tells us our operating range in points (not watts) and granularity
 
+// Temperature control parameters
+const unsigned long TEMPERATURE_VALID_FOR_MS = 60 * 60 * 1000; // 1 hour timeout for temperature readings
+const unsigned long ROOM_HOT_DEVICE_OFF_DURATION_MS = 60 * 60 * 1000; // 1 hour duration for temperature-based shutdown
+
+// Temperature tracking variables
+float room_temperature = 0;
+float ext_temperature = 0;
+unsigned long last_room_temp_update = 0;
+unsigned long last_ext_temp_update = 0;
+unsigned long device_off_until = 0; // When device is forced off due to temperature
+
 // This heater has 3 maximum power settings, 600, 900 and 1500W. Determine
 // which mode we are running in based on live consumption feedback. 
 float radiator_max_power = 600;
@@ -27,6 +38,8 @@ bool ssrState;
 bool linky_sees_injection;
 
 unsigned long forced_mode_until = 0;
+
+bool radiator_security_thermostat_off = false;
 
 void setupOTA() {
     // Port defaults to 8266
@@ -97,6 +110,11 @@ float watts_to_duty_points(float w)
 // Returns true if the duty points were changed
 bool set_duty_points(int new_duty_points)
 {
+    if (millis() < device_off_until) {
+        // Temperature-based shutdown is active, ignore duty point changes
+        new_duty_points = 0;
+    }
+
     if (new_duty_points < 0) {
         new_duty_points = 0;
     } else if (new_duty_points > DUTY_POINTS_TOTAL) {
@@ -206,6 +224,11 @@ void netpower_cb(const char *topic, const char *payload)
         return;
     }
 
+    if (radiator_security_thermostat_off) {
+        // Do not increase consumption if the radiator is off despite a non-zero duty cycle.
+        return;
+    }
+
     // How much to increase the power consumption of the heater? 
     int increase = floorf(watts_to_duty_points(-netpower)) - 1;
 
@@ -234,10 +257,14 @@ void myconsumption_cb(const char *topic, const char *payload)
 
     // This is a sanity check from theoretical calculation of duty_points/DUTY_POINTS_TOTAL * 600W (depends on the setting of the heater).
     float myconsumption = atof(payload);
-    if (myconsumption == 0.0) {
-        // The thermostat on the radiator is off: this is unavoidable and expected behavior
+    if (myconsumption == 0.0 && duty_points > 0) {
+        // The security thermostat on the radiator is off: this is unavoidable and expected behavior. Very unwelcome because the long term effective max duty cycle of this radiator turns out to be around 50%, which leads to unconsumable injection :(
+        // If radiator is off despite a non-zero duty cycle, then keep track of this information so that we do not increase the duty cycle.
+        radiator_security_thermostat_off = true;
+        mqtt.publish("triac_heat/log", "Radiator security thermostat appears off (0 consumption with non-zero duty cycle).");
         return;
     }
+    radiator_security_thermostat_off = false;
 
     int expected_dutypoints = watts_to_duty_points(myconsumption);
 
@@ -256,18 +283,79 @@ void myconsumption_cb(const char *topic, const char *payload)
     radiator_calculated_max_power /= 4;
     if (fabsf(radiator_calculated_max_power - 600) < 60) {
         radiator_max_power = 600;
-    } else if (fabsf(radiator_calculated_max_power - 900) < 90) {
-        radiator_max_power = 900;
+    } else if (fabsf(radiator_calculated_max_power - 950) < 90) {
+        radiator_max_power = 950; // the datasheet says 900W but I'm measuring closer to 950. temperature coefficient effects?
     } else if (fabsf(radiator_calculated_max_power - 1500) < 150) {
         radiator_max_power = 1500;
     } else {
-        mqtt.publish("triac_heat/log", String("Heater max power calculated to be ") + String(radiator_calculated_max_power) + String(" does not match any allowed value (600, 900, 1500) "));
+        mqtt.publish("triac_heat/log", String("Heater max power calculated to be ") + String(radiator_calculated_max_power) + String(" does not match any allowed value (600, 950, 1500) "));
     }
 
     if (radiator_max_power != old_max_power) {
         mqtt.publish("triac_heat/log", String("Heater max power detected to be ") + String(radiator_max_power) + String("W, calculated to be ") + String(radiator_calculated_max_power) + String("W"));
     }
 
+}
+
+void roomtemperature_cb(const char *topic, const char * payload)
+{
+  (void) topic;
+  float temperature = atof(payload);
+  if (temperature < 5 || temperature > 35) {
+    // Ignore invalid temperature
+    return;
+  }
+
+  // Update room temperature and timestamp
+  room_temperature = temperature;
+  last_room_temp_update = millis();
+
+  // Check temperature conditions
+  check_temperature_shutdown_conditions();
+}
+
+void exttemperature_cb(const char *topic, const char *payload)
+{
+  (void) topic;
+  float temperature = atof(payload);
+  if (temperature < -20 || temperature > 50) {
+    // Ignore invalid temperature
+    return;
+  }
+
+  // Update external temperature and timestamp
+  ext_temperature = temperature;
+  last_ext_temp_update = millis();
+
+  // Check temperature conditions
+  check_temperature_shutdown_conditions();
+}
+
+void check_temperature_shutdown_conditions() {
+  bool room_temp_valid = (millis() - last_room_temp_update) < TEMPERATURE_VALID_FOR_MS;
+  bool ext_temp_valid = (millis() - last_ext_temp_update) < TEMPERATURE_VALID_FOR_MS;
+
+  bool room_temp_wants_disable = false;
+  bool ext_temp_wants_disable = false;
+  bool do_disable = false;
+  if (ext_temp_valid && ext_temperature >= 19) {
+    // Exterior temperature of 19°C -> do not heat inside, no matter what the room temperature is
+    do_disable = true;
+  }
+
+  if (room_temp_valid && room_temperature >= 21) {
+    // Room temperature reached 21°C -> disable heating if exterior temperature
+    // is below 17°C or if exterior temperature is not available
+    if (!ext_temp_valid || ext_temperature > 17) {
+      do_disable = true;
+    }
+  }
+
+  if (do_disable) {
+    device_off_until = millis() + ROOM_HOT_DEVICE_OFF_DURATION_MS;
+    set_duty_points(0);
+    mqtt.publish("triac_heat/log", "Room or exterior temp high enough: turning off for 1 hour");
+  }
 }
 
 void setupMQTT() 
@@ -282,6 +370,8 @@ void setupMQTT()
   mqtt.subscribe("solar/ac/power", PVprod_cb);
   mqtt.subscribe("zigbee2mqtt/main_panel_powermonitor/power_ab", netpower_cb);
   mqtt.subscribe("zigbee2mqtt/smartplug_lidl/power", myconsumption_cb);
+  mqtt.subscribe("zigbee2mqtt/bedroom_thermometer/temperature", roomtemperature_cb);
+  mqtt.subscribe("exterior_thermometer/temperature", exttemperature_cb);
 
   mqtt.begin();
 }
@@ -298,8 +388,33 @@ void setupWebServer() {
       html += "<p style='color: red'>Forced mode active for " + String(remaining) + " more minutes</p>";
     }
     
+    if (millis() < device_off_until) {
+      unsigned long remaining = (device_off_until - millis()) / 60000;
+      html += "<p style='color: blue'>Temperature-based shutdown active for " + String(remaining) + " more minutes</p>";
+    }
+    
     html += "<p>Current duty points: " + String(duty_points) + "/" + String(DUTY_POINTS_TOTAL) + "</p>";
     html += "<p>Detected radiator max power: " + String(radiator_max_power) + "</p><p>Current power draw: " + String(duty_points * radiator_max_power / DUTY_POINTS_TOTAL) + "W</p>";
+    
+    // Temperature information
+    bool room_temp_valid = (millis() - last_room_temp_update) < TEMPERATURE_VALID_FOR_MS;
+    bool ext_temp_valid = (millis() - last_ext_temp_update) < TEMPERATURE_VALID_FOR_MS;
+    
+    html += "<p>Room temperature: ";
+    if (room_temp_valid) {
+      html += String(room_temperature) + "°C";
+    } else {
+      html += "No recent data";
+    }
+    html += "</p>";
+    
+    html += "<p>External temperature: ";
+    if (ext_temp_valid) {
+      html += String(ext_temperature) + "°C";
+    } else {
+      html += "No recent data";
+    }
+    html += "</p>";
     
     // Single form for both duty setting and force mode
     html += "<form method='POST' action='/setduty'>";
@@ -386,6 +501,14 @@ void setup() {
 
 void publishStatus() {
     mqtt.publish("triac_heat/duty_points", String(duty_points));
+    
+    // Publish temperature control status
+    if (millis() < device_off_until) {
+        unsigned long remaining_mins = (device_off_until - millis()) / 60000;
+        mqtt.publish("triac_heat/temp_shutdown_remaining", String(remaining_mins));
+    } else {
+        mqtt.publish("triac_heat/temp_shutdown_remaining", "0");
+    }
 }
 
 void loop() {

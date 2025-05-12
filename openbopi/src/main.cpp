@@ -39,8 +39,8 @@ float boxHumidity = 0;
 float orp_target = 680.0;  // Default ORP target
 bool orp_regulation_enabled = false;
 unsigned long last_chlorine_injection = 0;
-const unsigned long MIN_INJECTION_INTERVAL = 5 * 60 * 1000;  // 5 minutes
-const unsigned long CHLORINE_INJECTION_TIME = 10;   // 10 seconds injection
+unsigned long min_injection_interval = 5 * 60 * 1000;  // 5 minutes
+unsigned long chlorine_injection_time = 10;   // 10 seconds injection
     
 unsigned long next_publish_at = 0;
 unsigned long next_read_data_at = 0;
@@ -109,6 +109,8 @@ const char index_html[] PROGMEM = R"rawliteral(
         <p>Air Temperature: <span id="airtemp">%AIRTEMP%</span>°C</p>
         <p>ORP Regulation: <span id="orp_regulation">%ORP_REGULATION%</span></p>
         <p>ORP Target: <input type="number" id="orp_target" value="%ORP_TARGET%" onchange="updateORPTarget(this.value)"> mV</p>
+        <p>Injection Time: <input type="number" id="injection_time" value="%INJECTION_TIME%" onchange="updateInjectionTime(this.value)"> seconds</p>
+        <p>Injection Interval: <input type="number" id="injection_interval" value="%INJECTION_INTERVAL%" onchange="updateInjectionInterval(this.value)"> seconds</p>
         <p>Fast Publishing: <span id="fast_publish">%FAST_PUBLISH%</span></p>
         <p>Streaming Mode: <span id="streaming">%STREAMING%</span></p>
     </div>
@@ -139,6 +141,16 @@ const char index_html[] PROGMEM = R"rawliteral(
         }, 5000);
          function updateORPTarget(value) {
             fetch('/orp_target?value=' + value)
+                .then(response => response.text())
+                .then(data => console.log(data));
+        }
+        function updateInjectionTime(value) {
+            fetch('/injection_time?value=' + value)
+                .then(response => response.text())
+                .then(data => console.log(data));
+        }
+        function updateInjectionInterval(value) {
+            fetch('/injection_interval?value=' + value)
                 .then(response => response.text())
                 .then(data => console.log(data));
         }
@@ -193,7 +205,9 @@ void publishStatus() {
                    ",\"pump1\":" + String(pump_running[0]) +
                    ",\"pump2\":" + String(pump_running[1]) +
                    ",\"orp_regulation\":" + String(orp_regulation_enabled) +
-                   ",\"orp_target\":" + String(orp_target) + "}";
+                   ",\"orp_target\":" + String(orp_target) + 
+                   ",\"injection_time\":" + String(chlorine_injection_time) +
+                   ",\"injection_interval\":" + String(min_injection_interval / 1000) + "}";
     mqtt.publish("openbopi/pH", String(phValue, 2));
     mqtt.publish("openbopi/ORP", String(orpValue, 0));
     mqtt.publish("openbopi/orp_target", String(orp_target, 0));
@@ -204,6 +218,8 @@ void publishStatus() {
     mqtt.publish("openbopi/airtemp", String(airTemp, 1));
     mqtt.publish("openbopi/boxtemp", String(boxTemp, 1));
     mqtt.publish("openbopi/boxhumidity", String(boxHumidity, 0));
+    mqtt.publish("openbopi/injection_time", String(chlorine_injection_time));
+    mqtt.publish("openbopi/injection_interval", String(min_injection_interval / 1000));
     Serial.println(status);
 }
 
@@ -375,6 +391,23 @@ void mqtt_set_orp_target_cb(const char *payload)
     next_publish_at = millis();
 }
 
+void mqtt_set_injection_time_cb(const char *payload)
+{
+    int time = atoi(payload);
+    if (time > 0 && time <= 30) {  // Limit to 30 seconds max
+        chlorine_injection_time = time;
+        next_publish_at = millis();
+    }
+}
+
+void mqtt_set_injection_interval_cb(const char *payload)
+{
+    int interval_seconds = atoi(payload);
+    if (interval_seconds >= 60 && interval_seconds <= 7200) {  // Between 1 minute and 2 hours in seconds
+        min_injection_interval = interval_seconds * 1000;
+        next_publish_at = millis();
+    }
+}
 
 void toggle_ORP_regulation(bool status)
 {
@@ -416,10 +449,10 @@ void checkORPRegulation() {
     unsigned long now = millis();
     if (orpValue < orp_target && 
         !pump_running[1] &&
-        (now - last_chlorine_injection) > MIN_INJECTION_INTERVAL) {
+        (now - last_chlorine_injection) > min_injection_interval) {
        
         last_chlorine_injection = now;
-        start_pump(1, CHLORINE_INJECTION_TIME);
+        start_pump(1, chlorine_injection_time);
         mqtt.publish("openbopi/status", "Injecting chlorine");
     }
 }
@@ -433,6 +466,8 @@ void setupWebServer() {
         html.replace("%AIRTEMP%", String(airTemp, 1));
         html.replace("%ORP_REGULATION%", String(orp_regulation_enabled));
         html.replace("%ORP_TARGET%", String(orp_target, 3));
+        html.replace("%INJECTION_TIME%", String(chlorine_injection_time));
+        html.replace("%INJECTION_INTERVAL%", String(min_injection_interval / 1000));
         html.replace("%FAST_PUBLISH%", millis() < fast_publish_until ? "ON" : "OFF");
         html.replace("%STREAMING%", millis() < streaming_enabled_until ? "ON" : "OFF");
         request->send(200, "text/html", html);
@@ -458,6 +493,26 @@ void setupWebServer() {
      server.on("/orp_target", HTTP_GET, [](AsyncWebServerRequest *request) {
         if (request->hasParam("value")) {
             orp_target = request->getParam("value")->value().toFloat();
+        }
+        request->send(200, "text/plain", "OK");
+    });
+
+    server.on("/injection_time", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (request->hasParam("value")) {
+            int time = request->getParam("value")->value().toInt();
+            if (time > 0 && time <= 30) {  // Limit to 30 seconds max
+                chlorine_injection_time = time;
+            }
+        }
+        request->send(200, "text/plain", "OK");
+    });
+
+    server.on("/injection_interval", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (request->hasParam("value")) {
+            int interval_seconds = request->getParam("value")->value().toInt();
+            if (interval_seconds >= 60 && interval_seconds <= 7200) {  // Between 1 minute and 2 hours in seconds
+                min_injection_interval = interval_seconds * 1000;
+            }
         }
         request->send(200, "text/plain", "OK");
     });
@@ -510,6 +565,8 @@ void setup() {
     mqtt.subscribe("openbopi/force_pump_10sec", &mqtt_force_pump_cb);
     mqtt.subscribe("openbopi/set_orp_target", &mqtt_set_orp_target_cb);
     mqtt.subscribe("openbopi/enable_orp_regulation", &mqtt_enable_orp_regulation_cb);
+    mqtt.subscribe("openbopi/set_injection_time", &mqtt_set_injection_time_cb);
+    mqtt.subscribe("openbopi/set_injection_interval", &mqtt_set_injection_interval_cb);
 
     mqtt.begin();
     mqtt.loop();

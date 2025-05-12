@@ -39,7 +39,7 @@ float boxHumidity = 0;
 float orp_target = 680.0;  // Default ORP target
 bool orp_regulation_enabled = false;
 unsigned long last_chlorine_injection = 0;
-const unsigned long MIN_INJECTION_INTERVAL = 3 * 60 * 1000;  // 3 minutes
+const unsigned long MIN_INJECTION_INTERVAL = 5 * 60 * 1000;  // 5 minutes
 const unsigned long CHLORINE_INJECTION_TIME = 10;   // 10 seconds injection
     
 unsigned long next_publish_at = 0;

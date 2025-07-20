@@ -90,7 +90,7 @@ void stopCover() {
     mqtt.publish("pool_cover/log", "Pool cover stopped");
 }
 
-void startUp() {
+void goUp() {
     if (current_state == GOING_UP) {
         // Already going up, restart timer
         movement_start_time = millis();
@@ -105,7 +105,7 @@ void startUp() {
     mqtt.publish("pool_cover/log", "Pool cover going up");
 }
 
-void startDown() {
+void goDown() {
     if (current_state == GOING_DOWN) {
         // Already going down, restart timer
         movement_start_time = millis();
@@ -144,27 +144,21 @@ void checkMovementTimeout() {
 
 void setupMQTT() 
 {
-    mqtt.subscribe("pool_cover/up", [](const char* topic, const char* payload) {
+    mqtt.subscribe("pool_cover/command", [](const char* topic, const char* payload) {
         (void) topic;
-        (void) payload;
-        startUp();
-    });
-
-    mqtt.subscribe("pool_cover/down", [](const char* topic, const char* payload) {
-        (void) topic;
-        (void) payload;
-        startDown();
-    });
-
-    mqtt.subscribe("pool_cover/stop", [](const char* topic, const char* payload) {
-        (void) topic;
-        (void) payload;
-        stopCover();
+        String command = String(payload);
+        if (command == "up") {
+            goUp();
+        } else if (command == "down") {
+            goDown();
+        } else if (command == "stop") {
+            stopCover();
+        }
     });
 
     mqtt.subscribe("pool_cover/duration", [](const char* topic, const char* payload) {
         (void) topic;
-        unsigned long new_duration = atol(payload);
+        unsigned long new_duration = atol(payload) * 1000;
         if (new_duration > 0 && new_duration <= SAFETY_TIMEOUT_MS) {
             movement_duration = new_duration;
             mqtt.publish("pool_cover/log", String("Movement duration set to ") + String(movement_duration) + String("ms"));
@@ -235,9 +229,9 @@ void setupWebServer() {
         if (server.hasArg("action")) {
             String action = server.arg("action");
             if (action == "up") {
-                startUp();
+                goUp();
             } else if (action == "down") {
-                startDown();
+                goDown();
             } else if (action == "stop") {
                 stopCover();
             }
@@ -281,6 +275,7 @@ void setup() {
     setPins(false, false); // Ensure both pins are low at startup
 
     WiFi.mode(WIFI_STA);
+    WiFi.setSleepMode(WIFI_LIGHT_SLEEP); // Enable WiFi light sleep for power saving
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
@@ -299,13 +294,13 @@ void publishStatus() {
     String state_str;
     switch (current_state) {
         case STOPPED:
-            state_str = "stopped";
+            state_str = "stop";
             break;
         case GOING_UP:
-            state_str = "going_up";
+            state_str = "up";
             break;
         case GOING_DOWN:
-            state_str = "going_down";
+            state_str = "down";
             break;
     }
     
@@ -316,10 +311,7 @@ void publishStatus() {
         unsigned long remaining = (movement_duration - (millis() - movement_start_time)) / 1000;
         mqtt.publish("pool_cover/elapsed", String(elapsed));
         mqtt.publish("pool_cover/remaining", String(remaining));
-    } else {
-        mqtt.publish("pool_cover/elapsed", "0");
-        mqtt.publish("pool_cover/remaining", "0");
-    }
+    } 
 }
 
 void loop() {
@@ -333,7 +325,12 @@ void loop() {
     // Regular status updates
     if (millis() > next_publish_at) {
         publishStatus();
-        next_publish_at = millis() + 5 * 1000; // Publish every 5 seconds
+        // Publish every 5 minutes when stopped, every 5 seconds when moving
+        if (current_state == STOPPED) {
+            next_publish_at = millis() + 5 * 60 * 1000; // 5 minutes
+        } else {
+            next_publish_at = millis() + 5 * 1000; // 5 seconds
+        }
     }
 
     // If uptime exceeds 45 days, reboot to prevent overflows
@@ -345,5 +342,8 @@ void loop() {
         delay(100);
         ESP.restart();
     }
+    
+    // Let the ESP8266 yield to background tasks (WiFi, etc.)
+    yield();
 }
 

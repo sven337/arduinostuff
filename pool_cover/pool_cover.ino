@@ -288,6 +288,7 @@ void setup() {
     setupWebServer();
 
     Serial.println("Pool cover control system ready");
+    publishStatus();
 }
 
 void publishStatus() {
@@ -301,6 +302,9 @@ void publishStatus() {
             break;
         case GOING_DOWN:
             state_str = "down";
+            break;
+        default:
+            state_str = "error";
             break;
     }
     

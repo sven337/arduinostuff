@@ -29,6 +29,26 @@ float maxCurrent;
 bool throttlingCurrent;
 uint32_t throttling_current_until = 0;
 
+// Add these variables for storing log messages
+char pendingLogMessage[255] = "";
+bool logMessagePending = false;
+
+// Function to queue a log message for publishing in the main loop
+void queue_log_message(const char* message) {
+  strncpy(pendingLogMessage, message, sizeof(pendingLogMessage) - 1);
+  pendingLogMessage[sizeof(pendingLogMessage) - 1] = '\0'; // Ensure null termination
+  logMessagePending = true;
+}
+
+// Overload for formatted messages
+void queue_log_message_fmt(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  vsnprintf(pendingLogMessage, sizeof(pendingLogMessage) - 1, format, args);
+  va_end(args);
+  logMessagePending = true;
+}
+
 // HTML template
 const char INDEX_HTML[] PROGMEM = R"=====(
 <!DOCTYPE html>
@@ -349,7 +369,7 @@ void setupMQTT() {
     
     mqtt.subscribe(MQTT_TOPIC_ADPS, [](const char* payload) {
         if (strcmp(payload, "1") == 0) {
-            mqtt.publish("svevse/log", "ADPS, stopping charge");
+            queue_log_message("ADPS, stopping charge");
             adpsStopUntil = millis() + 1200000; // 20 minutes
             stopCharging();
         }
@@ -366,7 +386,7 @@ void setupMQTT() {
         if (headRoom > 500) {
             // Got enough headroom, no need to throttle
             if (throttlingCurrent && millis() > throttling_current_until) {
-                mqtt.publish("svevse/log", "PAPP: Enough headroom, restoring max current");
+                queue_log_message("PAPP: Enough headroom, restoring max current");
                 setChargeCurrent(100 * maxCurrent);
                 throttlingCurrent = false;
             }
@@ -383,13 +403,13 @@ void setupMQTT() {
         if (newAmps < 5.5) {
             newAmps = 5.5;
         }
-        char log[255];
-        snprintf(log, 255, "PAPP: %d, headroom %f, throttling to %.1fA to leave 500VA of headroom", val, headRoom, newAmps);
-        mqtt.publish("svevse/log", log);
+        
+        queue_log_message_fmt("PAPP: %d, headroom %f, throttling to %.1fA to leave 500VA of headroom", 
+                val, headRoom, newAmps);
+        
         setChargeCurrent(100 * newAmps);
         throttlingCurrent = true;
         throttling_current_until = millis() + 10 * 60 * 1000; // 10 minutes
-
     });
 
     mqtt.subscribe("edf/PTEC", [](const char *payload) {
@@ -398,7 +418,7 @@ void setupMQTT() {
 
             // Block charging in PJR. Partially redundant with the below, but I've had misses
             if (charging && !strcmp(payload, "PJR")) {
-                mqtt.publish("svevse/log", "In PJR, stopping charge");
+                queue_log_message("In PJR, stopping charge");
                 stopCharging();
             }
 
@@ -410,11 +430,11 @@ void setupMQTT() {
 
             /* PJB PJR PJW, CJB CJR CJW */
             if (period == 'C') {
-                mqtt.publish("svevse/log", "Entering Heure Creuse, starting charge");
+                queue_log_message("Entering Heure Creuse, starting charge");
                 startCharging();
                 return;
             } else if (last_period_type == 'C') {
-                mqtt.publish("svevse/log", "Leaving Heure Creuse, stopping charge");
+                queue_log_message("Leaving Heure Creuse, stopping charge");
                 stopCharging();
                 return;
             }
@@ -664,14 +684,16 @@ void setup() {
     setupWebServer();
 
     // Default safety values: boot current 8A, max cable 12A
-    writeRegister(2000, 8);
+    writeRegister(2000, 10);
     writeRegister(2007, 12);
-    maxCurrent = 8;
+    maxCurrent = 10;
 
     // Minimal current for this car is 5A
     writeRegister(2002, 5);
    
     startCharging();
+
+    queue_log_message("Svenvse started");
 }
 
 void publishStatus() {
@@ -729,6 +751,13 @@ void loop() {
    
     static uint32_t last_read_regs = 0;
 
+    // Check if there's a pending log message to publish
+    if (logMessagePending) {
+        mqtt.publish("svevse/log", pendingLogMessage);
+        logMessagePending = false;
+        pendingLogMessage[0] = '\0'; // Clear the message
+    }
+
     if (!last_read_regs || millis() - last_read_regs > 250) {
         readEvseRegisters();
         last_read_regs = millis();
@@ -749,6 +778,15 @@ void loop() {
     if (adpsStopUntil > 0 && millis() > adpsStopUntil) {
         adpsStopUntil = 0;
         startCharging();
+    }
+    
+    // Reboot on overflow
+    const unsigned long REBOOT_AT_MILLIS = 4200000000UL;  // Reboot at ~48.6 days, safely before overflow at 49.7 days
+    if (millis() > REBOOT_AT_MILLIS) {
+        Serial.println("Approaching millis() overflow, rebooting...");
+        mqtt.publish("openbopi/status", "Rebooting due to millis() overflow prevention");
+        delay(100);  // Allow time for MQTT message to be sent
+        ESP.restart();
     }
 }
 

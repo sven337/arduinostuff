@@ -186,7 +186,7 @@ static void handleRoot() {
 	snprintf(tempBuf, 4096,
 "<html><meta http-equiv=\"refresh\" content=\"30\" />\
 <head><title>Boiler control</title></head><body>\
-    <h1>Boiler control</h1><p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d = %d ms</p>\
+    <h1>Boiler control</h1><p>Built on %s at %s</p><p>Uptime: %02d:%02d:%02d = %lu ms</p>\
 	<p>Mode is %s, boiler heat request is %d, %sforced until %d, %d minutes from now</p> \
     <p>Target temp %.1f, %sholding off for boiler until %d, %d minutes from now</p> \
     <p><a href=\"/hot\"><button class=\"button\">HOT</button></a>\
@@ -521,14 +521,14 @@ bool thermostat_requires_heat(void)
         living_temp += living->current_temp;
         cnt++;
     } else {
-        sprintf(logStr, "living therm too old: %d now is %d delta %d", living->last_seen, (int)millis(), (int)millis() - living->last_seen);
+        sprintf(logStr, "living therm too old: %u now is %u delta %d", living->last_seen, (int)millis(), (int)millis() - living->last_seen);
     }
 
     if (!last_seen_too_old(stove->last_seen)) {
         living_temp += stove->current_temp;
         cnt++;
     } else {
-        sprintf(logStr, "stove therm too old: %d now is %d delta %d", stove->last_seen, (int)millis(), (int)millis() - stove->last_seen);
+        sprintf(logStr, "stove therm too old: %u now is %u delta %d", stove->last_seen, (int)millis(), (int)millis() - stove->last_seen);
     }
 
     if (cnt) {

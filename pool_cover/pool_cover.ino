@@ -3,6 +3,8 @@
 #include <OneWire.h>
 #include <avr/sleep.h>
 #include <PinChangeInterrupt.h>  // Add PinChangeInterrupt library for INA226
+#include <Wire.h>
+#include <INA226.h>
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
@@ -62,6 +64,16 @@ const int ENCODER_DT_PIN = 4;   // Direction pin (DT)
 
 
 OneWire ds(DS18B20_PIN);
+INA226 ina226(0x40);  // Default I2C address for INA226
+
+// Overcurrent protection variables
+static unsigned long overcurrent_start_time = 0;
+static bool overcurrent_detected = false;
+static const float OVERCURRENT_THRESHOLD = 6.0; // 6 Amperes
+static const unsigned long OVERCURRENT_TIMEOUT = 15000; // 15 seconds
+
+// INA226 alert handling
+volatile bool ina226_alert_triggered = false;
 
 #if HAS_RF24
 RF24 radio(CE_PIN, CSN_PIN);
@@ -79,7 +91,6 @@ static unsigned long send_next_temperature_at = 0; // Time for next temperature/
 
 // RF24 interrupt handling
 volatile bool radio_packet_received = false;
-volatile unsigned long interrupt_count = 0;  // Debug counter
 
 // Encoder and position tracking variables
 const long DEFAULT_TRAVEL_DISTANCE = 30 * 2 * 170; // 30 steps/turn * 2 turns/motor turn * 170 motor turns
@@ -92,14 +103,16 @@ static bool has_marked_bottom = false;
 
 
 int init_failed = 0;
+bool ina226_initialized = false;
 
 // Thermometer address to identification letter mapping
-struct {
+const struct {
     uint8_t addr[8];
     uint8_t letter;
 } thermometer_letter_from_addr[] = {
-    {{ 0x28, 0xff, 0xf0, 0x19, 0x91, 0x15, 0x01, 0x42 }, 'T'}, //test
-	{{ 0x28, 0xFF, 0x9A, 0xEA, 0x90, 0x15, 0x01, 0x75 }, 'T'}, //test too
+    /*{{ 0x28, 0xff, 0xf0, 0x19, 0x91, 0x15, 0x01, 0x42 }, 'T'}, //test
+	{{ 0x28, 0xFF, 0x9A, 0xEA, 0x90, 0x15, 0x01, 0x75 }, 'T'}, //test too*/
+	 {{ 0x28, 0x84, 0xCC, 0xDC, 0x04, 0x00, 0x00, 0xA6 }, 'T'}, //test
 	{{ 0x28, 0xD7, 0xC4, 0xD9, 0x04, 0x00, 0x00, 0x6E }, 'P'}, // swimming pool (water)
 
 };
@@ -136,14 +149,12 @@ void encoder_interrupt() {
 // RF24 interrupt handler
 void rf24_interrupt() {
     radio_packet_received = true;
-    interrupt_count++; // Increment interrupt counter
 }
 
 // INA226 interrupt handler
 void ina226_interrupt() {
-    // INA226 alert triggered - could be overcurrent, undervoltage, etc.
-    // Flag can be checked in main loop if needed
-    // For now, just acknowledge the interrupt
+    // INA226 alert triggered - set flag for main loop processing
+    ina226_alert_triggered = true;
 }
 
 // Function to get identification letter for a given address
@@ -165,13 +176,13 @@ uint8_t get_thermometer_letter(uint8_t addr[8]) {
 
 // Function to print address in copy-pasteable format
 void print_unknown_address(uint8_t addr[8]) {
-    Serial.print("Unknown thermometer address: {{ 0x");
+    Serial.print(F("Unknown thermometer address: {{ 0x"));
     for (uint8_t i = 0; i < 8; i++) {
-        if (addr[i] < 0x10) Serial.print("0");
+        if (addr[i] < 0x10) Serial.print(F("0"));
         Serial.print(addr[i], HEX);
-        if (i < 7) Serial.print(", 0x");
+        if (i < 7) Serial.print(F(", 0x"));
     }
-    Serial.println(" }, 'X'}, //unknown");
+    Serial.println(F(" }, 'X'}, //unknown"));
 }
 
 
@@ -187,6 +198,13 @@ void stop_motor()
 	analogWrite(MOTOR_PWM_A_PIN, 0);
 	analogWrite(MOTOR_PWM_B_PIN, 0);
 	motor_running = false;
+	
+	// Reset overcurrent protection
+	overcurrent_detected = false;
+	
+	// Put INA226 to sleep when motor stops
+	ina226_sleep();
+	
 	send_cover_status();
 }
 
@@ -217,6 +235,9 @@ void start_motor(char direction)
 	motor_running = true;
 	motor_direction = direction;
 	motor_stop_at = millis() + motor_duration;
+	
+	// Wake up INA226 for current monitoring
+	ina226_wake();
 	
 	// Set target encoder position based on direction and limits
 	long current_pos = encoder_position;
@@ -260,21 +281,21 @@ int radio_send(uint8_t pipe_id, uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	
 	delayMicroseconds(5000);
 	bool ok = radio.write(payload, 4);
-	Serial.print("radio_send p");
+	Serial.print(F("radio_send p"));
 	Serial.print(pipe_id);
-	Serial.print("[");
+	Serial.print(F("["));
 	Serial.print((char)p0);
-	Serial.print(" 0x");
-	if (p1 < 16) Serial.print("0");
+	Serial.print(F(" 0x"));
+	if (p1 < 16) Serial.print(F("0"));
 	Serial.print(p1, HEX);
-	Serial.print(" 0x");
-	if (p2 < 16) Serial.print("0");
+	Serial.print(F(" 0x"));
+	if (p2 < 16) Serial.print(F("0"));
 	Serial.print(p2, HEX);
-	Serial.print(" 0x");
-	if (p3 < 16) Serial.print("0");
+	Serial.print(F(" 0x"));
+	if (p3 < 16) Serial.print(F("0"));
 	Serial.print(p3, HEX);
-	Serial.print("] -> ");
-	Serial.println(ok ? "OK" : "KO");
+	Serial.print(F("] -> "));
+	Serial.println(ok ? F("OK") : F("KO"));
 	
 	// Resume listening after sending
 	radio.startListening();
@@ -307,6 +328,11 @@ void send_solar_voltage(uint16_t voltage_mv)
 	radio_send(PIPE_POOL_COVER, 'S', voltage_mv & 0xFF, (voltage_mv >> 8) & 0xFF, 0);
 }
 
+void send_battery_power(uint16_t power_mw)
+{
+	radio_send(PIPE_POOL_COVER, 'P', power_mw & 0xFF, (power_mw >> 8) & 0xFF, 0);
+}
+
 void send_battery_current(int16_t current_ma)
 {
 	radio_send(PIPE_POOL_COVER, 'I', current_ma & 0xFF, (current_ma >> 8) & 0xFF, 0);
@@ -335,9 +361,9 @@ void send_cover_status()
 
 void process_cover_command(uint8_t cmd, uint8_t param1, uint8_t param2, uint8_t param3)
 {
-	Serial.print("Cover command: ");
+	Serial.print(F("Cover command: "));
 	Serial.print((char)cmd);
-	Serial.print(" ");
+	Serial.print(F(" "));
 	Serial.print((char)param1);
 	Serial.println();
 	
@@ -354,18 +380,18 @@ void process_cover_command(uint8_t cmd, uint8_t param1, uint8_t param2, uint8_t 
 				break;
 			case 'M': // Mark travel limit
 				if (param2 == 'T') {
-					Serial.println("Mark travel top");
+					Serial.println(F("Mark travel top"));
 					// Mark current position as top
 					encoder_top_position = encoder_position;
 					has_marked_top = true;
-					Serial.print("Top marked at encoder position: ");
+					Serial.print(F("Top marked at encoder position: "));
 					Serial.println(encoder_top_position);
 				} else if (param2 == 'D') {
-					Serial.println("Mark travel bottom");
+					Serial.println(F("Mark travel bottom"));
 					// Mark current position as bottom
 					encoder_bottom_position = encoder_position;
 					has_marked_bottom = true;
-					Serial.print("Bottom marked at encoder position: ");
+					Serial.print(F("Bottom marked at encoder position: "));
 					Serial.println(encoder_bottom_position);
 				}
 				break;
@@ -419,10 +445,29 @@ void check_radio_messages()
 #endif
 }
 
+// INA226 power management functions
+void ina226_sleep() {
+	if (ina226.isCalibrated()) {
+		ina226.shutDown();
+		Serial.println(F("INA226 entering sleep mode"));
+	}
+}
+
+void ina226_wake() {
+	if (ina226.isCalibrated()) {
+		ina226.setModeShuntBusContinuous();
+		// Re-configure alert after wake up
+		uint16_t alert_limit = 240000;  // 6A threshold
+		ina226.setAlertLimit(alert_limit);
+		ina226.setAlertRegister(INA226_SHUNT_OVER_VOLTAGE);
+		Serial.println(F("INA226 waking up from sleep mode"));
+	}
+}
+
 void setup(){
 	printf_begin();
 	Serial.begin(115200);
-	printf("Pool cover controller starting...\n");  
+	Serial.println(F("Pool cover controller starting..."));  
 
 	// H-bridge motor control pins
 	pinMode(MOTOR_PWM_A_PIN, OUTPUT);
@@ -480,8 +525,52 @@ void setup(){
 	}
 #endif
 
+	// Initialize I2C for INA226
+	Wire.begin();
+	
+	// Initialize INA226
+	if (!ina226.begin()) {
+		Serial.println(F("ERROR: Failed to initialize INA226"));
+	}  else {
+		// Configure INA226 for R100 shunt (0.1 ohm) with max 10A range
+		// Using setMaxCurrentShunt with 10A max and 0.1 ohm shunt
+		int cal_result = ina226.setMaxCurrentShunt(10.0, 0.1, true);
+		if (cal_result != 0) {
+			Serial.print(F("ERROR: INA226 calibration failed with code: 0x"));
+			Serial.println(cal_result, HEX);
+			init_failed = 1;
+		} else {
+			Serial.print(F("INA226 calibrated successfully. Current LSB: "));
+			Serial.print(ina226.getCurrentLSB_mA());
+			Serial.println(F(" mA"));
+		}
+		
+		// Set conversion time for both shunt and bus voltage (default is fine)
+		// Enable continuous shunt and bus voltage monitoring
+		ina226.setModeShuntBusContinuous();
+		
+		// Configure alert for overcurrent detection (6A threshold)
+		// Set alert limit to 6A in terms of shunt voltage
+		// Shunt voltage = current * shunt_resistance = 6A * 0.1Ω = 0.6V = 600mV
+		// INA226 shunt voltage register LSB is 2.5µV, so 600mV = 600000µV / 2.5µV = 240000 counts
+		uint16_t alert_limit = 240000;  // 6A * 0.1Ω / 2.5µV
+		if (!ina226.setAlertLimit(alert_limit)) {
+			Serial.println(F("ERROR: Failed to set INA226 alert limit"));
+		}
+		
+		// Configure alert register for shunt overvoltage (overcurrent)
+		if (!ina226.setAlertRegister(INA226_SHUNT_OVER_VOLTAGE)) {
+			Serial.println(F("ERROR: Failed to configure INA226 alert register"));
+		} else {
+			Serial.print(F("INA226 alert configured for overcurrent at "));
+			Serial.print(OVERCURRENT_THRESHOLD);
+			Serial.println(F("A"));
+		}
 
-	Serial.println("Pool cover controller ready");
+		ina226_initialized = true;
+	}
+
+	Serial.println(F("Pool cover controller ready"));
 
 	radio_send(PIPE_POOL_COVER, 'Q', 'b', 0, 0); //"booting"
 	stop_motor();
@@ -498,23 +587,70 @@ void loop()
 	if (motor_running) {
 		bool must_stop = false;
 		
+		// Check for INA226 alert (overcurrent)
+		if (ina226_initialized && ina226_alert_triggered) {
+			ina226_alert_triggered = false; // Clear flag
+			
+			// Read current to confirm and get exact value
+			float current_a = ina226.getCurrent();
+			
+			if (current_a >= OVERCURRENT_THRESHOLD) {
+				if (!overcurrent_detected) {
+					// Start overcurrent timer
+					overcurrent_detected = true;
+					overcurrent_start_time = millis();
+					Serial.print(F("Overcurrent alert triggered: "));
+					Serial.print(current_a);
+					Serial.println(F("A - starting timer"));
+				}
+			}
+			
+			// Clear the alert flag in INA226 by reading the alert register
+			ina226.getAlertFlag();
+
+			send_next_temperature_at = millis(); // Send update immediately
+		}
+		
+		// Check overcurrent timer if overcurrent was detected
+		if (overcurrent_detected) {
+			float current_a = ina226.getCurrent();
+			
+			if (current_a >= OVERCURRENT_THRESHOLD) {
+				// Still overcurrent - check timeout
+				if (millis() - overcurrent_start_time >= OVERCURRENT_TIMEOUT) {
+					Serial.print(F("Motor stopped: overcurrent protection ("));
+					Serial.print(current_a);
+					Serial.print(F("A for "));
+					Serial.print((millis() - overcurrent_start_time) / 1000.0);
+					Serial.println(F(" seconds)"));
+					must_stop = true;
+				}
+			} else {
+				// Current dropped below threshold - reset
+				Serial.print(F("Overcurrent cleared: "));
+				Serial.print(current_a);
+				Serial.println(F("A"));
+				overcurrent_detected = false;
+			}
+		}
+		
 		// Check if time limit reached
 		if (millis() >= motor_stop_at) {
-			Serial.println("Motor stopped: time limit reached");
+			Serial.println(F("Motor stopped: time limit reached"));
 			must_stop = true;
 		}
 		
 		if (motor_direction == 'U') {
 			// Moving up - stop if we've reached or passed the target (going negative)
 			if (encoder_position >= encoder_target_position) {
-				Serial.print("Motor stopped: up position limit reached at ");
+				Serial.print(F("Motor stopped: up position limit reached at "));
 				Serial.println(encoder_position);
 				must_stop = true;
 			}
 		} else { // motor_direction == 'D'
 			// Moving down - stop if we've reached or passed the target (going positive)
 			if (encoder_position <= encoder_target_position) {
-				Serial.print("Motor stopped: down position limit reached at ");
+				Serial.print(F("Motor stopped: down position limit reached at "));
 				Serial.println(encoder_position);
 				must_stop = true;
 			}
@@ -536,6 +672,39 @@ void loop()
 		
 		// Send status
 		send_cover_status();
+		
+		// Read and send INA226 measurements
+		if (ina226_initialized) {
+			bool was_sleeping = !motor_running;
+			
+			// Wake up INA226 if it was sleeping for measurement
+			if (was_sleeping) {
+				ina226_wake();
+				delay(50); // Allow time for measurements to stabilize
+			}
+			
+			// Read bus voltage (mV)
+			float bus_voltage_v = ina226.getBusVoltage();
+			uint16_t voltage_mv = (uint16_t)(bus_voltage_v * 1000.0);
+			send_battery_voltage(voltage_mv);
+			
+			// Read power (mW) 
+			float power_w = ina226.getPower();
+			uint32_t temp_power_mw = (uint32_t)(power_w * 1000.0);
+			uint16_t power_mw = (temp_power_mw > 0xFFFF) ? 0xFFFF : (uint16_t)temp_power_mw;
+			send_battery_power(power_mw);
+			
+			Serial.print("INA226: ");
+			Serial.print(bus_voltage_v);
+			Serial.print(F("V "));
+			Serial.print(power_w);
+			Serial.println(F("W"));
+			
+			// Put INA226 back to sleep if motor is not running
+			if (was_sleeping) {
+				ina226_sleep();
+			}
+		}
 		
 		// Send temperature data from all thermometers
 		uint8_t addr[8];
@@ -571,7 +740,7 @@ void loop()
 
 			// Check CRC
 			if (data[8] != OneWire::crc8(data, 8)) {
-				Serial.print("ERROR: CRC didn't match for thermometer ");
+				Serial.print(F("ERROR: CRC mismatch for thermometer "));
 				Serial.println((char)identification_letter);
 				// Indicate that we read garbage
 				radio_send(PIPE_TEMPERATURE, 'T', identification_letter, 0xFF, 0xFF);
@@ -615,7 +784,7 @@ void loop()
 	if (!motor_running && !radio_packet_received) {
 		// Calculate time until next required action
 		unsigned long current_time = millis();
-		unsigned long sleep_time = 0;
+		unsigned long sleep_time = send_next_temperature_at - current_time;
 		
 		if (sleep_time > 32768L) { // Max 32 seconds sleep
 			sleep_time = 32768L;
@@ -627,6 +796,7 @@ void loop()
 		Serial.print("Sleeping for ");
 		Serial.print(sleep_time);
 		Serial.println("ms");
+		Serial.flush();
 		Sleepy::loseSomeTime(sleep_time);
 	}
 }

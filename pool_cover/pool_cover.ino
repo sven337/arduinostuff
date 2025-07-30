@@ -64,7 +64,7 @@ const int ENCODER_DT_PIN = 4;   // Direction pin (DT)
 
 
 OneWire ds(DS18B20_PIN);
-INA226 ina226(0x40);  // Default I2C address for INA226
+INA226 ina226(0x44); 
 
 // Overcurrent protection variables
 static unsigned long overcurrent_start_time = 0;
@@ -125,8 +125,8 @@ void encoder_interrupt() {
     static unsigned long last_interrupt_time = 0;
     unsigned long interrupt_time = millis();
     
-    // Debounce: ignore interrupts within 10ms
-    if (interrupt_time - last_interrupt_time < 10) {
+    // Debounce: ignore interrupts within 5ms
+    if (interrupt_time - last_interrupt_time < 5) {
         return;
     }
     
@@ -447,17 +447,17 @@ void check_radio_messages()
 
 // INA226 power management functions
 void ina226_sleep() {
-	if (ina226.isCalibrated()) {
+	if (ina226_initialized && ina226.isCalibrated()) {
 		ina226.shutDown();
 		Serial.println(F("INA226 entering sleep mode"));
 	}
 }
 
 void ina226_wake() {
-	if (ina226.isCalibrated()) {
+	if (ina226_initialized && ina226.isCalibrated()) {
 		ina226.setModeShuntBusContinuous();
 		// Re-configure alert after wake up
-		uint16_t alert_limit = 240000;  // 6A threshold
+		uint16_t alert_limit = 28000;  // 0.7A threshold with 0.1Ω shunt
 		ina226.setAlertLimit(alert_limit);
 		ina226.setAlertRegister(INA226_SHUNT_OVER_VOLTAGE);
 		Serial.println(F("INA226 waking up from sleep mode"));
@@ -527,47 +527,71 @@ void setup(){
 
 	// Initialize I2C for INA226
 	Wire.begin();
+	Serial.println(F("I2C initialized"));
 	
 	// Initialize INA226
 	if (!ina226.begin()) {
-		Serial.println(F("ERROR: Failed to initialize INA226"));
-	}  else {
-		// Configure INA226 for R100 shunt (0.1 ohm) with max 10A range
-		// Using setMaxCurrentShunt with 10A max and 0.1 ohm shunt
-		int cal_result = ina226.setMaxCurrentShunt(10.0, 0.1, true);
-		if (cal_result != 0) {
-			Serial.print(F("ERROR: INA226 calibration failed with code: 0x"));
-			Serial.println(cal_result, HEX);
-			init_failed = 1;
-		} else {
+		Serial.println(F("ERROR: Failed to initialize INA226 at address 0x44"));
+		Serial.println(F("Check wiring and connections"));
+		init_failed = 1;
+	} else {
+		Serial.println(F("INA226 initialized successfully at 0x44"));
+		ina226_initialized = true;
+	}
+	
+	// Configure INA226 if it was successfully initialized
+	if (ina226_initialized) {
+		Serial.println(F("Configuring INA226..."));
+		
+		// Configure INA226 for 0.1 ohm shunt with LIMITED 0.8A max current
+		float shunt_ohms = 0.1;  // 100 milliohm shunt (R100) - LIMITS RANGE!
+		float max_current = 0.8;  // 0.8A max current (INA226 limit with 0.1Ω shunt)
+		
+		Serial.print(F("Calibrating with max current: "));
+		Serial.print(max_current);
+		Serial.print(F("A, shunt: "));
+		Serial.print(shunt_ohms);
+		Serial.print(F(" ohm... "));
+		
+		int cal_result = ina226.setMaxCurrentShunt(max_current, shunt_ohms, true);
+		if (cal_result == 0) {
+			Serial.println(F("SUCCESS!"));
+			
 			Serial.print(F("INA226 calibrated successfully. Current LSB: "));
 			Serial.print(ina226.getCurrentLSB_mA());
 			Serial.println(F(" mA"));
-		}
-		
-		// Set conversion time for both shunt and bus voltage (default is fine)
-		// Enable continuous shunt and bus voltage monitoring
-		ina226.setModeShuntBusContinuous();
-		
-		// Configure alert for overcurrent detection (6A threshold)
-		// Set alert limit to 6A in terms of shunt voltage
-		// Shunt voltage = current * shunt_resistance = 6A * 0.1Ω = 0.6V = 600mV
-		// INA226 shunt voltage register LSB is 2.5µV, so 600mV = 600000µV / 2.5µV = 240000 counts
-		uint16_t alert_limit = 240000;  // 6A * 0.1Ω / 2.5µV
-		if (!ina226.setAlertLimit(alert_limit)) {
-			Serial.println(F("ERROR: Failed to set INA226 alert limit"));
-		}
-		
-		// Configure alert register for shunt overvoltage (overcurrent)
-		if (!ina226.setAlertRegister(INA226_SHUNT_OVER_VOLTAGE)) {
-			Serial.println(F("ERROR: Failed to configure INA226 alert register"));
+			Serial.print(F("IMPORTANT: Current measurement saturates at "));
+			Serial.print(max_current);
+			Serial.println(F("A with this shunt!"));
+			
+			// Set conversion time for both shunt and bus voltage (default is fine)
+			// Enable continuous shunt and bus voltage monitoring
+			ina226.setModeShuntBusContinuous();
+			
+			// Configure alert for overcurrent detection (0.7A threshold)
+			// For 0.1 ohm shunt: 0.7A * 0.1Ω = 0.07V = 70mV
+			// INA226 shunt voltage register LSB is 2.5µV, so 70mV = 70000µV / 2.5µV = 28000 counts
+			uint16_t alert_limit = 28000;  // 0.7A * 0.1Ω / 2.5µV
+			if (!ina226.setAlertLimit(alert_limit)) {
+				Serial.println(F("ERROR: Failed to set INA226 alert limit"));
+			}
+			
+			// Configure alert register for shunt overvoltage (overcurrent)
+			if (!ina226.setAlertRegister(INA226_SHUNT_OVER_VOLTAGE)) {
+				Serial.println(F("ERROR: Failed to configure INA226 alert register"));
+			} else {
+				Serial.print(F("INA226 alert configured for overcurrent at "));
+				Serial.print(OVERCURRENT_THRESHOLD);
+				Serial.println(F("A"));
+			}
 		} else {
-			Serial.print(F("INA226 alert configured for overcurrent at "));
-			Serial.print(OVERCURRENT_THRESHOLD);
-			Serial.println(F("A"));
+			Serial.print(F("FAILED (0x"));
+			Serial.print(cal_result, HEX);
+			Serial.println(F(")"));
+			Serial.println(F("ERROR: INA226 calibration failed"));
+			ina226_initialized = false;
+			init_failed = 1;
 		}
-
-		ina226_initialized = true;
 	}
 
 	Serial.println(F("Pool cover controller ready"));
@@ -688,17 +712,33 @@ void loop()
 			uint16_t voltage_mv = (uint16_t)(bus_voltage_v * 1000.0);
 			send_battery_voltage(voltage_mv);
 			
-			// Read power (mW) 
+			// Read signed current (mA) - positive = discharging, negative = charging
+			float current_a = ina226.getCurrent();
+			int16_t current_ma = (int16_t)(current_a * 1000.0);
+			send_battery_current(current_ma);
+			
+			// Read power (mW) - always positive in INA226
 			float power_w = ina226.getPower();
-			uint32_t temp_power_mw = (uint32_t)(power_w * 1000.0);
-			uint16_t power_mw = (temp_power_mw > 0xFFFF) ? 0xFFFF : (uint16_t)temp_power_mw;
-			send_battery_power(power_mw);
+			long temp_power_mw = (long)(power_w * 1000.0);
+
+			// Clamp to int16_t bounds
+			if (temp_power_mw > INT16_MAX) temp_power_mw = INT16_MAX;
+			if (temp_power_mw < INT16_MIN) temp_power_mw = INT16_MIN;
+
+			int16_t power_mw = (int16_t)temp_power_mw;
+		
+			// Apply sign of current since power is unsigned in INA226
+			power_mw = (current_a >= 0) ? power_mw : -power_mw; 
+			send_battery_power((uint16_t)power_mw);
 			
 			Serial.print("INA226: ");
 			Serial.print(bus_voltage_v);
-			Serial.print(F("V "));
-			Serial.print(power_w);
-			Serial.println(F("W"));
+			Serial.print(F("V, "));
+			Serial.print(current_a);
+			Serial.print(F("A"));
+			Serial.print(F(", "));
+			Serial.print(power_mw);
+			Serial.println(F("mW"));
 			
 			// Put INA226 back to sleep if motor is not running
 			if (was_sleeping) {

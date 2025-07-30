@@ -2,6 +2,7 @@
 #include <JeeLib.h>
 #include <OneWire.h>
 #include <avr/sleep.h>
+#include <PinChangeInterrupt.h>  // Add PinChangeInterrupt library for INA226
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
@@ -15,14 +16,14 @@
  *   0  - RX (Serial) - Reserved for programming/debugging
  *   1  - TX (Serial) - Reserved for programming/debugging  
  *   2  - Encoder CLK (interrupt capable)
- *   3  - INA226 Alert pin
+ *   3  - RF24 IRQ (interrupt capable) - for radio packet reception
  *   4  - Encoder DT (direction)
  *   5  - Motor PWM A (PWM)
  *   6  - Motor PWM B (PWM)
  *   7  - DS18B20 temperature sensor
  *   8  - RF24 CSN
  *   9  - RF24 CE (PWM)
- *   10 - Available (PWM capable)
+ *   10 - INA226 Alert pin (Pin Change Interrupt capable)
  *   11 - RF24 MOSI (PWM, SPI)
  *   12 - RF24 MISO (SPI)
  *   13 - RF24 SCK (SPI) + onboard LED
@@ -40,10 +41,11 @@
 
 const int SCL_PIN = A5;        // I2C for INA226
 const int SDA_PIN = A4;        // I2C for INA226
-const int INA226_ALERT_PIN = 3;  // INA226 alert pin
+const int INA226_ALERT_PIN = 10; // INA226 alert pin (Pin Change Interrupt)
 
 const int CE_PIN = 9;          // RF24 CE
 const int CSN_PIN = 8;         // RF24 CSN
+const int RF24_IRQ_PIN = 3;    // RF24 IRQ pin for external interrupts
 const int DS18B20_PIN = 7;     // DS18B20 temperature sensor
 
 // H-bridge motor control pins
@@ -69,18 +71,22 @@ const uint64_t pipe_address_temperature = 0xF0F0F0F0F4LL;
 #define PIPE_TEMPERATURE 4
 #endif
 
-static unsigned long motor_duration = 120000; // 2 minutes
+static unsigned long motor_duration = 10 * 60 * 1000UL; // 10 minutes
 static unsigned long motor_stop_at = 0;
 static bool motor_running = false;
 static char motor_direction = 'U';
 static unsigned long send_next_temperature_at = 0; // Time for next temperature/status send
 
+// RF24 interrupt handling
+volatile bool radio_packet_received = false;
+volatile unsigned long interrupt_count = 0;  // Debug counter
+
 // Encoder and position tracking variables
 const long DEFAULT_TRAVEL_DISTANCE = 30 * 2 * 170; // 30 steps/turn * 2 turns/motor turn * 170 motor turns
 volatile long encoder_position = 0;  // Current encoder position
 static long encoder_target_position = 0;  // Target position for current movement
-static long encoder_top_position = 0;     // Marked top position
-static long encoder_bottom_position = DEFAULT_TRAVEL_DISTANCE; // Marked bottom position (170 motor turns * 2)
+static long encoder_top_position = DEFAULT_TRAVEL_DISTANCE;     // Marked top position
+static long encoder_bottom_position = -DEFAULT_TRAVEL_DISTANCE; // Marked bottom position (170 motor turns * 2)
 static bool has_marked_top = false;
 static bool has_marked_bottom = false;
 
@@ -106,24 +112,38 @@ void encoder_interrupt() {
     static unsigned long last_interrupt_time = 0;
     unsigned long interrupt_time = millis();
     
-    // Debounce: ignore interrupts within 5ms
-    if (interrupt_time - last_interrupt_time < 5) {
+    // Debounce: ignore interrupts within 10ms
+    if (interrupt_time - last_interrupt_time < 10) {
         return;
     }
-    last_interrupt_time = interrupt_time;
     
     // Read both pins to determine direction
     bool clk_state = digitalRead(ENCODER_CLK_PIN);
     bool dt_state = digitalRead(ENCODER_DT_PIN);
     
-    // If CLK and DT are different, we're moving clockwise
-    encoder_direction_cw = (clk_state != dt_state);
+    // If CLK and DT are equal, we're moving clockwise
+    encoder_direction_cw = (clk_state == dt_state);
     
     if (encoder_direction_cw) {
         encoder_position++;
     } else {
         encoder_position--;
     }
+    
+	last_interrupt_time = millis();
+}
+
+// RF24 interrupt handler
+void rf24_interrupt() {
+    radio_packet_received = true;
+    interrupt_count++; // Increment interrupt counter
+}
+
+// INA226 interrupt handler
+void ina226_interrupt() {
+    // INA226 alert triggered - could be overcurrent, undervoltage, etc.
+    // Flag can be checked in main loop if needed
+    // For now, just acknowledge the interrupt
 }
 
 // Function to get identification letter for a given address
@@ -206,14 +226,14 @@ void start_motor(char direction)
 		if (has_marked_top) {
 			encoder_target_position = encoder_top_position;
 		} else {
-			encoder_target_position = current_pos - DEFAULT_TRAVEL_DISTANCE;
+			encoder_target_position = current_pos + DEFAULT_TRAVEL_DISTANCE;
 		}
 	} else { // direction == 'D'
 		// Moving down - target is bottom position or current + default travel
 		if (has_marked_bottom) {
 			encoder_target_position = encoder_bottom_position;
 		} else {
-			encoder_target_position = current_pos + DEFAULT_TRAVEL_DISTANCE;
+			encoder_target_position = current_pos - DEFAULT_TRAVEL_DISTANCE;
 		}
 	}
 	
@@ -228,6 +248,9 @@ int radio_send(uint8_t pipe_id, uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 #if HAS_RF24
 	uint8_t payload[4] = { p0, p1, p2, p3 };
 	
+	// Must stop listening before changing writing pipe
+	radio.stopListening();
+	
 	// Select the appropriate writing pipe
 	if (pipe_id == PIPE_POOL_COVER) {
 		radio.openWritingPipe(pipe_address_cover);
@@ -237,9 +260,24 @@ int radio_send(uint8_t pipe_id, uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	
 	delayMicroseconds(5000);
 	bool ok = radio.write(payload, 4);
-	printf("radio_send: pipe_id=%d, payload=[%c 0x%02x 0x%02x 0x%02x], result=%s\n", 
-		pipe_id, p0, p1, p2, p3, ok ? "OK" : "KO");
+	Serial.print("radio_send p");
+	Serial.print(pipe_id);
+	Serial.print("[");
+	Serial.print((char)p0);
+	Serial.print(" 0x");
+	if (p1 < 16) Serial.print("0");
+	Serial.print(p1, HEX);
+	Serial.print(" 0x");
+	if (p2 < 16) Serial.print("0");
+	Serial.print(p2, HEX);
+	Serial.print(" 0x");
+	if (p3 < 16) Serial.print("0");
+	Serial.print(p3, HEX);
+	Serial.print("] -> ");
+	Serial.println(ok ? "OK" : "KO");
 	
+	// Resume listening after sending
+	radio.startListening();
 
 	if (!ok) {
 		return -1;
@@ -286,7 +324,7 @@ void send_motor_temperature(int16_t temp_hundredths_c)
 
 void send_cover_status()
 {
-	// 'Q' for status, motor_direction is 'U'/'D'/'S'
+	// 'Q' for status, motor_direction is 'U'/'D'/'S'/'b' (booting)
 	radio_send(PIPE_POOL_COVER, 'Q', motor_running ? motor_direction : 'S', 0, 0); 
 	
 	// If motor is running, also send current encoder position
@@ -339,9 +377,9 @@ void process_cover_command(uint8_t cmd, uint8_t param1, uint8_t param2, uint8_t 
 		unsigned long duration = param1 | (param2 << 8) | (param3 << 16); // duration in seconds
 		// Convert seconds to milliseconds
 		duration = duration * 1000UL;
-		// Sanity check: limit to 5 minutes (300 seconds)
-		if (duration > 300000UL) {
-			duration = 300000UL;
+		// Sanity check: limit to 10 minutes
+		if (duration > 600000UL) {
+			duration = 600000UL;
 		}
 		motor_duration = duration;
 	}
@@ -351,11 +389,14 @@ void check_radio_messages()
 {
 #if HAS_RF24
 	uint8_t pipe_num;
-	if (radio.available(&pipe_num)) {
+	bool packet_processed = false;
+	
+	while (radio.available(&pipe_num)) {
 		uint8_t payload[4];
 		radio.read(payload, 4);
+		packet_processed = true;
 		
-		Serial.print("Received on pipe ");
+/*		Serial.print("Received on pipe ");
 		Serial.print(pipe_num);
 		Serial.print(": ");
 		Serial.print((char)payload[0]);
@@ -363,11 +404,17 @@ void check_radio_messages()
 			Serial.print(payload[i], HEX);
 			Serial.print(" ");
 		}
-		Serial.println();
+		Serial.println();*/
 		
 		if (pipe_num == PIPE_POOL_COVER) {
 			process_cover_command(payload[0], payload[1], payload[2], payload[3]);
 		}
+	}
+	
+	// Clear RF24 interrupt flags after processing all packets
+	if (packet_processed) {
+		bool tx_ok, tx_fail, rx_ready;
+		radio.whatHappened(tx_ok, tx_fail, rx_ready); // This clears the interrupt flags
 	}
 #endif
 }
@@ -386,6 +433,8 @@ void setup(){
 
 	// INA226 alert pin
 	pinMode(INA226_ALERT_PIN, INPUT_PULLUP);
+	// Attach Pin Change Interrupt to INA226 alert pin (pin 10)
+	attachPCINT(digitalPinToPCINT(INA226_ALERT_PIN), ina226_interrupt, FALLING);
 
 	// Encoder pins
 	pinMode(ENCODER_CLK_PIN, INPUT_PULLUP);
@@ -393,6 +442,10 @@ void setup(){
 	
 	// Attach interrupt to encoder CLK pin
 	attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), encoder_interrupt, CHANGE);
+
+	// RF24 IRQ pin
+	pinMode(RF24_IRQ_PIN, INPUT_PULLUP); 
+	attachInterrupt(digitalPinToInterrupt(RF24_IRQ_PIN), rf24_interrupt, FALLING);
 
 #if HAS_RF24
 	// Radio init
@@ -411,10 +464,14 @@ void setup(){
 	radio.openReadingPipe(PIPE_TEMPERATURE, pipe_address_temperature);
 	radio.openReadingPipe(PIPE_POOL_COVER, pipe_address_cover);
 	
+	// Enable interrupt ONLY on data received (RX_DR)
+	// maskIRQ(tx_ds, tx_fail, rx_ready) - 1=mask(disable), 0=enable
+	radio.maskIRQ(1, 1, 0); // Mask TX_DS and MAX_RT, enable RX_DR only
+	
 	radio.startListening();
 
 	radio.printDetails();
-
+	
 	if ((radio.getDataRate() != RF24_250KBPS) ||
 		(radio.getCRCLength() != RF24_CRC_16) /*|| 
 		(radio.getChannel() != 95)*/) {
@@ -425,16 +482,18 @@ void setup(){
 
 
 	Serial.println("Pool cover controller ready");
-	Serial.print("Initial encoder position: ");
-	Serial.println(encoder_position);
+
+	radio_send(PIPE_POOL_COVER, 'Q', 'b', 0, 0); //"booting"
 	stop_motor();
 }
 
 void loop() 
 {
-	// Check for incoming radio messages
-	check_radio_messages();
-	
+	if (radio_packet_received) {
+		radio_packet_received = false; // Clear flag
+		check_radio_messages();
+	}
+
 	// Drive motor
 	if (motor_running) {
 		bool must_stop = false;
@@ -447,14 +506,14 @@ void loop()
 		
 		if (motor_direction == 'U') {
 			// Moving up - stop if we've reached or passed the target (going negative)
-			if (encoder_position <= encoder_target_position) {
+			if (encoder_position >= encoder_target_position) {
 				Serial.print("Motor stopped: up position limit reached at ");
 				Serial.println(encoder_position);
 				must_stop = true;
 			}
 		} else { // motor_direction == 'D'
 			// Moving down - stop if we've reached or passed the target (going positive)
-			if (encoder_position >= encoder_target_position) {
+			if (encoder_position <= encoder_target_position) {
 				Serial.print("Motor stopped: down position limit reached at ");
 				Serial.println(encoder_position);
 				must_stop = true;
@@ -474,10 +533,6 @@ void loop()
 		} else {
 			send_next_temperature_at = millis() + 15 * 60 * 1000LL; // 15 minutes
 		}
-		
-#if HAS_RF24
-		radio.stopListening();
-#endif
 		
 		// Send status
 		send_cover_status();
@@ -554,15 +609,25 @@ void loop()
 		} else {
 			printf("Read %d thermometer(s)\n", thermometer_count);
 		}
-#if HAS_RF24
-		radio.startListening();
-#endif
 	}
 
-	
-	if (!motor_running) {
-		//Serial.flush();
-		//Sleepy::loseSomeTime(512L);
+	// Power management: calculate optimal sleep time
+	if (!motor_running && !radio_packet_received) {
+		// Calculate time until next required action
+		unsigned long current_time = millis();
+		unsigned long sleep_time = 0;
+		
+		if (sleep_time > 32768L) { // Max 32 seconds sleep
+			sleep_time = 32768L;
+		} else if (sleep_time < 128L) { // Min 128ms sleep
+			sleep_time = 128L;
+		}
+		
+		// Sleep for calculated time (power saving)
+		Serial.print("Sleeping for ");
+		Serial.print(sleep_time);
+		Serial.println("ms");
+		Sleepy::loseSomeTime(sleep_time);
 	}
 }
 

@@ -87,7 +87,8 @@ static unsigned long motor_duration = 10 * 60 * 1000UL; // 10 minutes
 static unsigned long motor_stop_at = 0;
 static bool motor_running = false;
 static char motor_direction = 'U';
-static unsigned long send_next_temperature_at = 0; // Time for next temperature/status send
+static unsigned long send_next_temperature_at = 0; // Time for next temperature send
+static unsigned long send_next_status_at = 0; // Time for next status send
 
 // RF24 interrupt handling
 volatile bool radio_packet_received = false;
@@ -154,7 +155,8 @@ void rf24_interrupt() {
 // INA226 interrupt handler
 void ina226_interrupt() {
     // INA226 alert triggered - set flag for main loop processing
-    ina226_alert_triggered = true;
+//    ina226_alert_triggered = true;
+	// Disable until I have the correct shunt
 }
 
 // Function to get identification letter for a given address
@@ -260,7 +262,7 @@ void start_motor(char direction)
 	
 	send_cover_status();
 	// Start 15-second cycle for frequent updates while motor running
-	send_next_temperature_at = millis() + 15000LL;
+	send_next_status_at = millis() + 5000LL;
 }
 
 
@@ -632,7 +634,7 @@ void loop()
 			// Clear the alert flag in INA226 by reading the alert register
 			ina226.getAlertFlag();
 
-			send_next_temperature_at = millis(); // Send update immediately
+			send_next_status_at = millis(); // Send update immediately
 		}
 		
 		// Check overcurrent timer if overcurrent was detected
@@ -684,17 +686,14 @@ void loop()
 			stop_motor();
 		}
 	}
-
-	// Send temperature/status
-	if (millis() >= send_next_temperature_at) {
-		// Set next send time: 15 seconds when motor running, 15 minutes when not
-		if (motor_running) {
-			send_next_temperature_at = millis() + 15 * 1000LL; // 15 seconds
-		} else {
-			send_next_temperature_at = millis() + 15 * 60 * 1000LL; // 15 minutes
-		}
 		
-		// Send status
+	// Send status
+	if (millis() >= send_next_status_at) {
+		if (motor_running) {
+			send_next_status_at = millis() + 5000LL;
+		} else {
+			send_next_status_at = millis() + 15 * 60 * 1000LL; // 15 minutes
+		}
 		send_cover_status();
 		
 		// Read and send INA226 measurements
@@ -745,7 +744,12 @@ void loop()
 				ina226_sleep();
 			}
 		}
-		
+	}
+
+	// Send temperature
+	if (millis() >= send_next_temperature_at) {
+		send_next_temperature_at = millis() + 15 * 60 * 1000LL; // 15 minutes
+
 		// Send temperature data from all thermometers
 		uint8_t addr[8];
 		uint8_t thermometer_count = 0;
@@ -762,7 +766,7 @@ void loop()
 				print_unknown_address(addr);
 				continue; // Skip unknown thermometers
 			}
-			
+
 			// Read temperature from this thermometer
 			ds.reset();
 			ds.select(addr);
@@ -824,7 +828,10 @@ void loop()
 	if (!motor_running && !radio_packet_received) {
 		// Calculate time until next required action
 		unsigned long current_time = millis();
-		unsigned long sleep_time = send_next_temperature_at - current_time;
+		unsigned long sleep_time_temeprature = send_next_temperature_at - current_time;
+		unsigned long sleep_time_status = send_next_status_at - current_time;
+
+		unsigned long sleep_time = min(sleep_time_temeprature, sleep_time_status);
 		
 		if (sleep_time > 32768L) { // Max 32 seconds sleep
 			sleep_time = 32768L;

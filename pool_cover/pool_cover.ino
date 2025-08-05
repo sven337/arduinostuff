@@ -83,7 +83,8 @@ const uint64_t pipe_address_temperature = 0xF0F0F0F0F4LL;
 #define PIPE_TEMPERATURE 4
 #endif
 
-static unsigned long motor_duration = 10 * 60 * 1000UL; // 10 minutes
+static unsigned long motor_duration_up = 10 * 60 * 1000UL; // 10 minutes for up
+static unsigned long motor_duration_down = 9 * 60 * 1000UL; // 9 minutes for down
 static unsigned long motor_stop_at = 0;
 static bool motor_running = false;
 static char motor_direction = 'U';
@@ -97,8 +98,8 @@ volatile bool radio_packet_received = false;
 const long DEFAULT_TRAVEL_DISTANCE = 30 * 2 * 170; // 30 steps/turn * 2 turns/motor turn * 170 motor turns
 volatile long encoder_position = 0;  // Current encoder position
 static long encoder_target_position = 0;  // Target position for current movement
-static long encoder_top_position = DEFAULT_TRAVEL_DISTANCE;     // Marked top position
-static long encoder_bottom_position = -DEFAULT_TRAVEL_DISTANCE; // Marked bottom position (170 motor turns * 2)
+static long encoder_top_position = -DEFAULT_TRAVEL_DISTANCE;     // Marked top position
+static long encoder_bottom_position = DEFAULT_TRAVEL_DISTANCE; // Marked bottom position (170 motor turns * 2)
 static bool has_marked_top = false;
 static bool has_marked_bottom = false;
 
@@ -126,10 +127,10 @@ void encoder_interrupt() {
     static unsigned long last_interrupt_time = 0;
     unsigned long interrupt_time = millis();
     
-    // Debounce: ignore interrupts within 5ms
-    if (interrupt_time - last_interrupt_time < 5) {
+    /*// Debounce: ignore interrupts within 2ms
+    if (interrupt_time - last_interrupt_time < 1) {
         return;
-    }
+    }*/
     
     // Read both pins to determine direction
     bool clk_state = digitalRead(ENCODER_CLK_PIN);
@@ -236,7 +237,9 @@ void start_motor(char direction)
 	
 	motor_running = true;
 	motor_direction = direction;
-	motor_stop_at = millis() + motor_duration;
+	// Use different durations based on direction
+	unsigned long duration = (direction == 'U') ? motor_duration_up : motor_duration_down;
+	motor_stop_at = millis() + duration;
 	
 	// Wake up INA226 for current monitoring
 	ina226_wake();
@@ -249,14 +252,14 @@ void start_motor(char direction)
 		if (has_marked_top) {
 			encoder_target_position = encoder_top_position;
 		} else {
-			encoder_target_position = current_pos + DEFAULT_TRAVEL_DISTANCE;
+			encoder_target_position = current_pos - DEFAULT_TRAVEL_DISTANCE;
 		}
 	} else { // direction == 'D'
 		// Moving down - target is bottom position or current + default travel
 		if (has_marked_bottom) {
 			encoder_target_position = encoder_bottom_position;
 		} else {
-			encoder_target_position = current_pos - DEFAULT_TRAVEL_DISTANCE;
+			encoder_target_position = current_pos + DEFAULT_TRAVEL_DISTANCE;
 		}
 	}
 	
@@ -409,7 +412,9 @@ void process_cover_command(uint8_t cmd, uint8_t param1, uint8_t param2, uint8_t 
 		if (duration > 600000UL) {
 			duration = 600000UL;
 		}
-		motor_duration = duration;
+		// Set both up and down durations to the same value for remote commands
+		motor_duration_up = duration;
+		motor_duration_down = duration;
 	}
 }
 

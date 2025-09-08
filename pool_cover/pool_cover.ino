@@ -2,7 +2,8 @@
 #include <JeeLib.h>
 #include <OneWire.h>
 #include <avr/sleep.h>
-#include <PinChangeInterrupt.h>  // Add PinChangeInterrupt library for INA226
+#include <avr/wdt.h>
+#include <PinChangeInterrupt.h>
 #include <Wire.h>
 #include <INA226.h>
 #include "printf.h" 
@@ -31,14 +32,14 @@
  *   13 - RF24 SCK (SPI) + onboard LED
  * 
  * Analog Pins:
- *   A0 - Motor Enable A (used as digital output)
- *   A1 - Motor Enable B (used as digital output)
+ *   A0 - Motor Enable (both BTN7960B enables connected together)
+ *   A1 - Available
  *   A2 - Available
  *   A3 - Available
  *   A4 - I2C SDA (INA226)
  *   A5 - I2C SCL (INA226)
- *   A6 - Motor Current Sense A (analog only)
- *   A7 - Motor Current Sense B (analog only)
+ *   A6 - Motor Current Sense (analog only)
+ *   A7 - Available
  */
 
 const int SCL_PIN = A5;        // I2C for INA226
@@ -51,12 +52,10 @@ const int RF24_IRQ_PIN = 3;    // RF24 IRQ pin for external interrupts
 const int DS18B20_PIN = 7;     // DS18B20 temperature sensor
 
 // H-bridge motor control pins
-const int MOTOR_PWM_A_PIN = 5;    // PWM pin for motor A (H-bridge)
-const int MOTOR_PWM_B_PIN = 6;    // PWM pin for motor B (H-bridge) 
-const int MOTOR_ENABLE_A_PIN = A0; // Enable pin for motor A (used as digital)
-const int MOTOR_ENABLE_B_PIN = A1; // Enable pin for motor B (used as digital)
-const int MOTOR_CURRENT_A_PIN = A6; // Current sense for motor A (analog only)
-const int MOTOR_CURRENT_B_PIN = A7; // Current sense for motor B (analog only)
+const int MOTOR_PWM_A_PIN = 5;    // PWM pin for motor A (H-bridge left side)
+const int MOTOR_PWM_B_PIN = 6;    // PWM pin for motor B (H-bridge right side) 
+const int MOTOR_ENABLE_PIN = A0;  // Enable pin for both BTN7960B (connected together)
+const int MOTOR_CURRENT_PIN = A6; // Motor current sense (analog only)
 
 // KY-040 Encoder pins
 const int ENCODER_CLK_PIN = 2;  // Interrupt pin (CLK)
@@ -64,7 +63,8 @@ const int ENCODER_DT_PIN = 4;   // Direction pin (DT)
 
 
 OneWire ds(DS18B20_PIN);
-INA226 ina226(0x44); 
+const uint8_t INA226_I2C_ADDRESS = 0x44;
+INA226 ina226(INA226_I2C_ADDRESS); 
 
 // Overcurrent protection variables
 static unsigned long overcurrent_start_time = 0;
@@ -83,23 +83,26 @@ const uint64_t pipe_address_temperature = 0xF0F0F0F0F4LL;
 #define PIPE_TEMPERATURE 4
 #endif
 
-static unsigned long motor_duration_up = 10 * 60 * 1000UL; // 10 minutes for up
-static unsigned long motor_duration_down = 9 * 60 * 1000UL; // 9 minutes for down
+static unsigned long motor_duration_up = 9.5 * 60 * 1000UL; // 10 minutes for up
+static unsigned long motor_duration_down = 8.5 * 60 * 1000UL; // 9 minutes for down
 static unsigned long motor_stop_at = 0;
 static bool motor_running = false;
 static char motor_direction = 'U';
 static unsigned long send_next_temperature_at = 0; // Time for next temperature send
 static unsigned long send_next_status_at = 0; // Time for next status send
 
+// Reboot mechanism to avoid millis() overflow issues
+const unsigned long REBOOT_AT_MILLIS = 4200000000UL; // ~48.6 days
+
 // RF24 interrupt handling
 volatile bool radio_packet_received = false;
 
 // Encoder and position tracking variables
-const long DEFAULT_TRAVEL_DISTANCE = 30 * 2 * 170; // 30 steps/turn * 2 turns/motor turn * 170 motor turns
+const long DEFAULT_TRAVEL_DISTANCE = 30 * 12; // 30 steps/turn * 12 turns
 volatile long encoder_position = 0;  // Current encoder position
 static long encoder_target_position = 0;  // Target position for current movement
 static long encoder_top_position = -DEFAULT_TRAVEL_DISTANCE;     // Marked top position
-static long encoder_bottom_position = DEFAULT_TRAVEL_DISTANCE; // Marked bottom position (170 motor turns * 2)
+static long encoder_bottom_position = DEFAULT_TRAVEL_DISTANCE; // Marked bottom position
 static bool has_marked_top = false;
 static bool has_marked_bottom = false;
 
@@ -120,19 +123,37 @@ const struct {
 };
 
 const uint8_t num_known_thermometers = sizeof(thermometer_letter_from_addr) / sizeof(thermometer_letter_from_addr[0]);
+		
+
+/* My INA226 chip is off by a lot (possibly counterfeit?) https://github.com/RobTillaart/INA226/issues/30
+	* Measured -> Actual
+	* 17.062  -> 16.20
+	* 17.5    -> 16.61  
+	* 13.190  -> 12.51
+	* 12.137  -> 11.51
+	* 11.081  -> 10.50
+	* 10.025  -> 9.510
+	* Correction factor: 1.0542
+	*/
+const float INA226_VOLTAGE_CORRECTION = 1.0542f;
+
+// INA226 hardware constants
+const float SHUNT_RESISTANCE_OHMS = 0.012f;       // 12 milliohm shunt (R012)
+const float INA226_SHUNT_VOLTAGE_LSB = 0.0000025f; // 2.5µV per LSB for shunt voltage register
 
 // Encoder interrupt handler
 void encoder_interrupt() {
 	bool encoder_direction_cw;
     static unsigned long last_interrupt_time = 0;
+    
     unsigned long interrupt_time = millis();
     
-    /*// Debounce: ignore interrupts within 2ms
-    if (interrupt_time - last_interrupt_time < 1) {
+    // Debounce
+    if (interrupt_time - last_interrupt_time < 20) {
         return;
-    }*/
-    
-    // Read both pins to determine direction
+    }
+
+	// Read both pins to determine direction
     bool clk_state = digitalRead(ENCODER_CLK_PIN);
     bool dt_state = digitalRead(ENCODER_DT_PIN);
     
@@ -156,8 +177,7 @@ void rf24_interrupt() {
 // INA226 interrupt handler
 void ina226_interrupt() {
     // INA226 alert triggered - set flag for main loop processing
-//    ina226_alert_triggered = true;
-	// Disable until I have the correct shunt
+    ina226_alert_triggered = true;
 }
 
 // Function to get identification letter for a given address
@@ -194,10 +214,24 @@ ISR(WDT_vect)
 	Sleepy::watchdogEvent();
 }
 
+// Software reboot function
+void software_reboot() {
+	Serial.println(F("Rebooting to prevent millis() overflow..."));
+	Serial.flush();
+	
+	// Disable interrupts
+	cli();
+	
+	// Set watchdog timer to shortest timeout (16ms) and enable system reset mode
+	wdt_enable(WDTO_15MS);
+	
+	// Wait for watchdog to trigger reset
+	while(1) {}
+}
+
 void stop_motor()
 {
-	digitalWrite(MOTOR_ENABLE_A_PIN, LOW);
-	digitalWrite(MOTOR_ENABLE_B_PIN, LOW);
+	digitalWrite(MOTOR_ENABLE_PIN, LOW);
 	analogWrite(MOTOR_PWM_A_PIN, 0);
 	analogWrite(MOTOR_PWM_B_PIN, 0);
 	motor_running = false;
@@ -214,25 +248,23 @@ void stop_motor()
 void start_motor(char direction)
 {
 	// Stop motor first
-	digitalWrite(MOTOR_ENABLE_A_PIN, LOW);
-	digitalWrite(MOTOR_ENABLE_B_PIN, LOW);
 	analogWrite(MOTOR_PWM_A_PIN, 0);
 	analogWrite(MOTOR_PWM_B_PIN, 0);
+	digitalWrite(MOTOR_ENABLE_PIN, LOW);
 	delay(100);
+	
+	// Enable both BTN7960B half-bridges
+	digitalWrite(MOTOR_ENABLE_PIN, HIGH);
 	
 	// Set direction and start motor at full speed
 	if (direction == 'U') {
-		// Up direction: A enabled, B disabled
+		// Up direction: Left side active, right side off
 		analogWrite(MOTOR_PWM_A_PIN, 255);
 		analogWrite(MOTOR_PWM_B_PIN, 0);
-		digitalWrite(MOTOR_ENABLE_A_PIN, HIGH);
-		digitalWrite(MOTOR_ENABLE_B_PIN, LOW);
 	} else { // direction == 'D'
-		// Down direction: A disabled, B enabled
+		// Down direction: Left side off, right side active
 		analogWrite(MOTOR_PWM_A_PIN, 0);
 		analogWrite(MOTOR_PWM_B_PIN, 255);
-		digitalWrite(MOTOR_ENABLE_A_PIN, LOW);
-		digitalWrite(MOTOR_ENABLE_B_PIN, HIGH);
 	}
 	
 	motor_running = true;
@@ -320,7 +352,32 @@ uint16_t analog_to_millivolts(uint16_t analog_reading)
 	return (uint32_t)analog_reading * 3300 / 1024;
 }
 
+// Convert BTN7960B IS pin analog reading to motor current in milliamps
+// Using 10kΩ || 6.8kΩ = 4.05kΩ external resistor for 7A full-scale with 3.3V ADC
+// With 4.05kΩ external resistor and kILIS = 8500:
+// VIS = (IL / 8500) × 4050, so IL = VIS × 8500 / 4050 = VIS × 2.099 A/V
+uint16_t btn7960_analog_to_motor_current_ma(uint16_t analog_reading)
+{
+	// Convert ADC reading to voltage (mV)
+	uint16_t voltage_mv = analog_to_millivolts(analog_reading);
+	
+	// Convert voltage to current: IL = VIS × (8500/4050) A/V = VIS × 2.099 A/V
+	// IL(mA) = VIS(mV) × 2.099 = VIS(mV) × 2099 / 1000
+	uint32_t current_ma = (uint32_t)voltage_mv * 2099 / 1000;
+	
+	// With 4.05kΩ resistor (10kΩ || 6.8kΩ): 7A → 3.33V, optimal ADC usage
+	// ADC resolution: ~7.3mA per step
+	if (current_ma > 7500) current_ma = 7500;  // Safety margin
+	
+	return (uint16_t)current_ma;
+}
 
+// Read motor current from BTN7960B IS pin
+uint16_t read_motor_current_ma()
+{
+	uint16_t analog_reading = analogRead(MOTOR_CURRENT_PIN);
+	return btn7960_analog_to_motor_current_ma(analog_reading);
+}
 
 // Pool cover RF24 protocol functions
 void send_battery_voltage(uint16_t voltage_mv)
@@ -333,9 +390,26 @@ void send_solar_voltage(uint16_t voltage_mv)
 	radio_send(PIPE_POOL_COVER, 'S', voltage_mv & 0xFF, (voltage_mv >> 8) & 0xFF, 0);
 }
 
-void send_battery_power(uint16_t power_mw)
+// Sends battery power as signed 24-bit milliwatts (two's complement), little-endian in 3 data bytes.
+// This carries full mW resolution and increases dynamic range beyond int16. Receiver must sign-extend.
+void send_battery_power(int32_t power_mw)
 {
-	radio_send(PIPE_POOL_COVER, 'P', power_mw & 0xFF, (power_mw >> 8) & 0xFF, 0);
+    // Clamp to signed 24-bit range
+    const int32_t MAX_24BIT_SIGNED = (1L << 23) - 1;
+    const int32_t MIN_24BIT_SIGNED = -(1L << 23);
+    
+    if (power_mw > MAX_24BIT_SIGNED) power_mw = MAX_24BIT_SIGNED;
+    if (power_mw < MIN_24BIT_SIGNED) power_mw = MIN_24BIT_SIGNED;
+
+    // Convert to two's complement representation in the lower 24 bits of a uint32_t
+    uint32_t u24 = (uint32_t)power_mw & 0x00FFFFFF;
+    
+    // Extract bytes in little-endian order
+    uint8_t b0 = (uint8_t)(u24 & 0xFF);
+    uint8_t b1 = (uint8_t)((u24 >> 8) & 0xFF);
+    uint8_t b2 = (uint8_t)((u24 >> 16) & 0xFF);
+    
+    radio_send(PIPE_POOL_COVER, 'P', b0, b1, b2);
 }
 
 void send_battery_current(int16_t current_ma)
@@ -343,14 +417,14 @@ void send_battery_current(int16_t current_ma)
 	radio_send(PIPE_POOL_COVER, 'I', current_ma & 0xFF, (current_ma >> 8) & 0xFF, 0);
 }
 
+void send_motor_current(uint16_t current_ma)
+{
+	radio_send(PIPE_POOL_COVER, 'M', current_ma & 0xFF, (current_ma >> 8) & 0xFF, 0);
+}
+
 void send_encoder_position(int32_t position)
 {
 	radio_send(PIPE_POOL_COVER, 'E', position & 0xFF, (position >> 8) & 0xFF, (position >> 16) & 0xFF);
-}
-
-void send_motor_temperature(int16_t temp_hundredths_c)
-{
-	radio_send(PIPE_POOL_COVER, 'T', temp_hundredths_c & 0xFF, (temp_hundredths_c >> 8) & 0xFF, 0);
 }
 
 void send_cover_status()
@@ -385,14 +459,12 @@ void process_cover_command(uint8_t cmd, uint8_t param1, uint8_t param2, uint8_t 
 				break;
 			case 'M': // Mark travel limit
 				if (param2 == 'T') {
-					Serial.println(F("Mark travel top"));
 					// Mark current position as top
 					encoder_top_position = encoder_position;
 					has_marked_top = true;
 					Serial.print(F("Top marked at encoder position: "));
 					Serial.println(encoder_top_position);
 				} else if (param2 == 'D') {
-					Serial.println(F("Mark travel bottom"));
 					// Mark current position as bottom
 					encoder_bottom_position = encoder_position;
 					has_marked_bottom = true;
@@ -429,15 +501,6 @@ void check_radio_messages()
 		radio.read(payload, 4);
 		packet_processed = true;
 		
-/*		Serial.print("Received on pipe ");
-		Serial.print(pipe_num);
-		Serial.print(": ");
-		Serial.print((char)payload[0]);
-		for (int i = 1; i < 4; i++) {
-			Serial.print(payload[i], HEX);
-			Serial.print(" ");
-		}
-		Serial.println();*/
 		
 		if (pipe_num == PIPE_POOL_COVER) {
 			process_cover_command(payload[0], payload[1], payload[2], payload[3]);
@@ -452,11 +515,71 @@ void check_radio_messages()
 #endif
 }
 
+// INA226 identification functions
+uint16_t read_ina226_register(uint8_t reg_addr) {
+	Wire.beginTransmission(INA226_I2C_ADDRESS);
+	Wire.write(reg_addr);
+	if (Wire.endTransmission() != 0) {
+		return 0xFFFF; // Error indicator
+	}
+	
+	Wire.requestFrom(INA226_I2C_ADDRESS, 2);
+	if (Wire.available() != 2) {
+		return 0xFFFF; // Error indicator
+	}
+	
+	uint16_t value = Wire.read() << 8; // High byte first
+	value |= Wire.read(); // Low byte
+	return value;
+}
+
+void check_ina226_identification() {
+	Serial.println(F("Reading INA226 identification registers..."));
+	
+	// Read Manufacturer ID register (0xFE)
+	uint16_t manufacturer_id = read_ina226_register(0xFE);
+	Serial.print(F("Manufacturer ID (0xFE): 0x"));
+	Serial.print(manufacturer_id, HEX);
+	
+	if (manufacturer_id == 0x5449) {
+		Serial.println(F(" (Texas Instruments)"));
+	} else if (manufacturer_id == 0xFFFF) {
+		Serial.println(F(" - read error"));
+	} else {
+		Serial.println(F(" - unexpected value, expected 0x5449"));
+	}
+	
+	// Read Die ID register (0xFF)
+	uint16_t die_id = read_ina226_register(0xFF);
+	Serial.print(F("Die ID (0xFF): 0x"));
+	Serial.print(die_id, HEX);
+	
+	if (die_id == 0xFFFF) {
+		Serial.println(F(" - read error"));
+	} else {
+		// Extract device ID (bits 15-4) and die revision (bits 3-0)
+		uint16_t device_id = (die_id >> 4) & 0x0FFF;
+		uint8_t die_revision = die_id & 0x0F;
+		
+		Serial.print(F(" (Device ID: 0x"));
+		Serial.print(device_id, HEX);
+		Serial.print(F(", Die Rev: 0x"));
+		Serial.print(die_revision, HEX);
+		
+		if (device_id == 0x226) {
+			Serial.println(F(")"));
+		} else {
+			Serial.println(F(" - expected device ID 0x226)"));
+		}
+	}
+	
+	Serial.println();
+}
+
 // INA226 power management functions
 void ina226_sleep() {
 	if (ina226_initialized && ina226.isCalibrated()) {
 		ina226.shutDown();
-		Serial.println(F("INA226 entering sleep mode"));
 	}
 }
 
@@ -464,10 +587,10 @@ void ina226_wake() {
 	if (ina226_initialized && ina226.isCalibrated()) {
 		ina226.setModeShuntBusContinuous();
 		// Re-configure alert after wake up
-		uint16_t alert_limit = 28000;  // 0.7A threshold with 0.1Ω shunt
+		float alert_current = 6.0;  // Alert at 6.0A
+		uint16_t alert_limit = (alert_current * SHUNT_RESISTANCE_OHMS) / INA226_SHUNT_VOLTAGE_LSB;  // Convert to register counts
 		ina226.setAlertLimit(alert_limit);
 		ina226.setAlertRegister(INA226_SHUNT_OVER_VOLTAGE);
-		Serial.println(F("INA226 waking up from sleep mode"));
 	}
 }
 
@@ -479,9 +602,8 @@ void setup(){
 	// H-bridge motor control pins
 	pinMode(MOTOR_PWM_A_PIN, OUTPUT);
 	pinMode(MOTOR_PWM_B_PIN, OUTPUT);
-	pinMode(MOTOR_ENABLE_A_PIN, OUTPUT);
-	pinMode(MOTOR_ENABLE_B_PIN, OUTPUT);
-	// Note: A6 and A7 are analog-only, no pinMode needed for current sense
+	pinMode(MOTOR_ENABLE_PIN, OUTPUT);
+	// Note: A6 is analog-only, no pinMode needed for current sense
 
 	// INA226 alert pin
 	pinMode(INA226_ALERT_PIN, INPUT_PULLUP);
@@ -493,7 +615,7 @@ void setup(){
 	pinMode(ENCODER_DT_PIN, INPUT_PULLUP);
 	
 	// Attach interrupt to encoder CLK pin
-	attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), encoder_interrupt, CHANGE);
+	attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), encoder_interrupt, FALLING);
 
 	// RF24 IRQ pin
 	pinMode(RF24_IRQ_PIN, INPUT_PULLUP); 
@@ -538,47 +660,55 @@ void setup(){
 	
 	// Initialize INA226
 	if (!ina226.begin()) {
-		Serial.println(F("ERROR: Failed to initialize INA226 at address 0x44"));
+		Serial.print(F("ERROR: Failed to initialize INA226 at address 0x"));
+		Serial.println(INA226_I2C_ADDRESS, HEX);
 		Serial.println(F("Check wiring and connections"));
 		init_failed = 1;
 	} else {
-		Serial.println(F("INA226 initialized successfully at 0x44"));
+		Serial.print(F("INA226 initialized successfully at 0x"));
+		Serial.println(INA226_I2C_ADDRESS, HEX);
 		ina226_initialized = true;
+		
+		// Check INA226 identification to verify authenticity
+		check_ina226_identification();
 	}
 	
 	// Configure INA226 if it was successfully initialized
 	if (ina226_initialized) {
 		Serial.println(F("Configuring INA226..."));
 		
-		// Configure INA226 for 0.1 ohm shunt with LIMITED 0.8A max current
-		float shunt_ohms = 0.1;  // 100 milliohm shunt (R100) - LIMITS RANGE!
-		float max_current = 0.8;  // 0.8A max current (INA226 limit with 0.1Ω shunt)
+		// Calculate max current based on INA226 library constraint
+		// Library checks: maxCurrent * shunt <= 0.08190V (81.90mV)
+		float max_current = 0.08190 / SHUNT_RESISTANCE_OHMS;  // Maximum current the library will accept
 		
 		Serial.print(F("Calibrating with max current: "));
 		Serial.print(max_current);
-		Serial.print(F("A, shunt: "));
-		Serial.print(shunt_ohms);
-		Serial.print(F(" ohm... "));
+		Serial.print(F("A with "));
+		Serial.print(SHUNT_RESISTANCE_OHMS);
+		Serial.print(F(" ohm shunt... "));
 		
-		int cal_result = ina226.setMaxCurrentShunt(max_current, shunt_ohms, true);
+		int cal_result = ina226.setMaxCurrentShunt(max_current, SHUNT_RESISTANCE_OHMS, true);
 		if (cal_result == 0) {
 			Serial.println(F("SUCCESS!"));
 			
 			Serial.print(F("INA226 calibrated successfully. Current LSB: "));
 			Serial.print(ina226.getCurrentLSB_mA());
 			Serial.println(F(" mA"));
-			Serial.print(F("IMPORTANT: Current measurement saturates at "));
+			Serial.print(F("IMPORTANT: Current measurement range up to "));
 			Serial.print(max_current);
-			Serial.println(F("A with this shunt!"));
+			Serial.print(F("A with "));
+			Serial.print(SHUNT_RESISTANCE_OHMS);
+			Serial.println(F("Ω shunt!"));
 			
 			// Set conversion time for both shunt and bus voltage (default is fine)
 			// Enable continuous shunt and bus voltage monitoring
 			ina226.setModeShuntBusContinuous();
 			
-			// Configure alert for overcurrent detection (0.7A threshold)
-			// For 0.1 ohm shunt: 0.7A * 0.1Ω = 0.07V = 70mV
-			// INA226 shunt voltage register LSB is 2.5µV, so 70mV = 70000µV / 2.5µV = 28000 counts
-			uint16_t alert_limit = 28000;  // 0.7A * 0.1Ω / 2.5µV
+			// Configure alert for overcurrent detection (6.0A threshold)
+			// Calculate alert limit: I_alert * R_shunt / LSB_shunt_voltage
+			// INA226 shunt voltage register LSB is 2.5µV
+			float alert_current = 6.0;  // Alert at 6.0A
+			uint16_t alert_limit = (alert_current * SHUNT_RESISTANCE_OHMS) / INA226_SHUNT_VOLTAGE_LSB;  // Convert to register counts
 			if (!ina226.setAlertLimit(alert_limit)) {
 				Serial.println(F("ERROR: Failed to set INA226 alert limit"));
 			}
@@ -616,6 +746,8 @@ void loop()
 
 	// Drive motor
 	if (motor_running) {
+		check_radio_messages(); // Not needed most of the time, but I notice that when the motor is running, sometimes radio messages are missed. Let's see if this helps.
+
 		bool must_stop = false;
 		
 		// Check for INA226 alert (overcurrent)
@@ -673,14 +805,14 @@ void loop()
 		
 		if (motor_direction == 'U') {
 			// Moving up - stop if we've reached or passed the target (going negative)
-			if (encoder_position >= encoder_target_position) {
+			if (encoder_position <= encoder_target_position) {
 				Serial.print(F("Motor stopped: up position limit reached at "));
 				Serial.println(encoder_position);
 				must_stop = true;
 			}
 		} else { // motor_direction == 'D'
 			// Moving down - stop if we've reached or passed the target (going positive)
-			if (encoder_position <= encoder_target_position) {
+			if (encoder_position >= encoder_target_position) {
 				Serial.print(F("Motor stopped: down position limit reached at "));
 				Serial.println(encoder_position);
 				must_stop = true;
@@ -711,8 +843,8 @@ void loop()
 				delay(50); // Allow time for measurements to stabilize
 			}
 			
-			// Read bus voltage (mV)
-			float bus_voltage_v = ina226.getBusVoltage();
+			// Read bus voltage (mV) and apply correction for counterfeit chip
+			float bus_voltage_v = ina226.getBusVoltage() / INA226_VOLTAGE_CORRECTION;
 			uint16_t voltage_mv = (uint16_t)(bus_voltage_v * 1000.0);
 			send_battery_voltage(voltage_mv);
 			
@@ -721,27 +853,22 @@ void loop()
 			int16_t current_ma = (int16_t)(current_a * 1000.0);
 			send_battery_current(current_ma);
 			
-			// Read power (mW) - always positive in INA226
-			float power_w = ina226.getPower();
-			long temp_power_mw = (long)(power_w * 1000.0);
+			// Read power (mW) and apply voltage correction
+			float power_w = ina226.getPower() / INA226_VOLTAGE_CORRECTION;
+			int32_t power_mw = (int32_t)(power_w * 1000.0f);
 
-			// Clamp to int16_t bounds
-			if (temp_power_mw > INT16_MAX) temp_power_mw = INT16_MAX;
-			if (temp_power_mw < INT16_MIN) temp_power_mw = INT16_MIN;
+			// Apply sign of current since power appears to be unsigned in INA226
+			power_mw = (current_a >= 0.0f) ? power_mw : -power_mw;
 
-			int16_t power_mw = (int16_t)temp_power_mw;
-		
-			// Apply sign of current since power is unsigned in INA226
-			power_mw = (current_a >= 0) ? power_mw : -power_mw; 
-			send_battery_power((uint16_t)power_mw);
+			send_battery_power(power_mw);
 			
 			Serial.print("INA226: ");
-			Serial.print(bus_voltage_v);
+			Serial.print(bus_voltage_v, 3);
 			Serial.print(F("V, "));
-			Serial.print(current_a);
+			Serial.print(current_a, 3);
 			Serial.print(F("A"));
 			Serial.print(F(", "));
-			Serial.print(power_mw);
+			Serial.print(power_mw, 3);
 			Serial.println(F("mW"));
 			
 			// Put INA226 back to sleep if motor is not running
@@ -749,6 +876,16 @@ void loop()
 				ina226_sleep();
 			}
 		}
+		
+		// Read and send BTN7960B motor current (only when motor is running)
+		/*if (motor_running) {
+			uint16_t motor_current_ma = read_motor_current_ma();
+			send_motor_current(motor_current_ma);
+			
+			Serial.print("BTN7960B Motor Current: ");
+			Serial.print(motor_current_ma);
+			Serial.println(F("mA"));
+		}*/
 	}
 
 	// Send temperature
@@ -824,9 +961,12 @@ void loop()
 		
 		if (thermometer_count == 0) {
 			Serial.println("No DS18B20 thermometers found");
-		} else {
-			printf("Read %d thermometer(s)\n", thermometer_count);
 		}
+	}
+
+	// Check for millis() overflow prevention reboot
+	if (millis() >= REBOOT_AT_MILLIS && !motor_running) {
+		software_reboot();
 	}
 
 	// Power management: calculate optimal sleep time

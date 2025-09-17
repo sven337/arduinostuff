@@ -9,11 +9,12 @@
 #include "printf.h" 
 #include "nRF24L01.h"
 #include "RF24.h"
+#include "KY040.h"
 
 #define HAS_RF24 1
 
 /*
- * Complete Pin Assignment for Arduino Pro Mini:
+ * Pin Assignment for Arduino Pro Mini:
  * 
  * Digital Pins:
  *   0  - RX (Serial) - Reserved for programming/debugging
@@ -66,6 +67,9 @@ OneWire ds(DS18B20_PIN);
 const uint8_t INA226_I2C_ADDRESS = 0x44;
 INA226 ina226(INA226_I2C_ADDRESS); 
 
+// KY-040 Encoder object
+KY040 encoder(ENCODER_CLK_PIN, ENCODER_DT_PIN); 
+
 // Overcurrent protection variables
 static unsigned long overcurrent_start_time = 0;
 static bool overcurrent_detected = false;
@@ -83,8 +87,8 @@ const uint64_t pipe_address_temperature = 0xF0F0F0F0F4LL;
 #define PIPE_TEMPERATURE 4
 #endif
 
-static unsigned long motor_duration_up = 9.5 * 60 * 1000UL; // 10 minutes for up
-static unsigned long motor_duration_down = 8.5 * 60 * 1000UL; // 9 minutes for down
+static unsigned long motor_duration_up = 10 * 60 * 1000UL; // 10 minutes for up
+static unsigned long motor_duration_down = 430 * 1000UL; // 7 minutes 10 seconds for down
 static unsigned long motor_stop_at = 0;
 static bool motor_running = false;
 static char motor_direction = 'U';
@@ -97,8 +101,13 @@ const unsigned long REBOOT_AT_MILLIS = 4200000000UL; // ~48.6 days
 // RF24 interrupt handling
 volatile bool radio_packet_received = false;
 
+// Radio configuration monitoring
+static unsigned long check_radio_config_at = 0;
+static const unsigned long RADIO_CONFIG_CHECK_INTERVAL_MOTOR = 5000;    // 5 seconds when motor running
+static const unsigned long RADIO_CONFIG_CHECK_INTERVAL_IDLE = 3600000;  // 1 hour when idle
+
 // Encoder and position tracking variables
-const long DEFAULT_TRAVEL_DISTANCE = 30 * 12; // 30 steps/turn * 12 turns
+const long DEFAULT_TRAVEL_DISTANCE = 167; // Based on actual measurement, with 15 steps/turn = 10 turns
 volatile long encoder_position = 0;  // Current encoder position
 static long encoder_target_position = 0;  // Target position for current movement
 static long encoder_top_position = -DEFAULT_TRAVEL_DISTANCE;     // Marked top position
@@ -141,32 +150,17 @@ const float INA226_VOLTAGE_CORRECTION = 1.0542f;
 const float SHUNT_RESISTANCE_OHMS = 0.012f;       // 12 milliohm shunt (R012)
 const float INA226_SHUNT_VOLTAGE_LSB = 0.0000025f; // 2.5µV per LSB for shunt voltage register
 
-// Encoder interrupt handler
-void encoder_interrupt() {
-	bool encoder_direction_cw;
-    static unsigned long last_interrupt_time = 0;
-    
-    unsigned long interrupt_time = millis();
-    
-    // Debounce
-    if (interrupt_time - last_interrupt_time < 20) {
-        return;
+// Encoder interrupt handler for KY040 library (shared by both interrupt types)
+void encoder_interrupt_handler() {
+    // Process pin state using KY040 library
+    switch (encoder.getRotation()) {
+        case KY040::CLOCKWISE:
+            encoder_position++;
+            break;
+        case KY040::COUNTERCLOCKWISE:
+            encoder_position--;
+            break;
     }
-
-	// Read both pins to determine direction
-    bool clk_state = digitalRead(ENCODER_CLK_PIN);
-    bool dt_state = digitalRead(ENCODER_DT_PIN);
-    
-    // If CLK and DT are equal, we're moving clockwise
-    encoder_direction_cw = (clk_state == dt_state);
-    
-    if (encoder_direction_cw) {
-        encoder_position++;
-    } else {
-        encoder_position--;
-    }
-    
-	last_interrupt_time = millis();
 }
 
 // RF24 interrupt handler
@@ -179,6 +173,16 @@ void ina226_interrupt() {
     // INA226 alert triggered - set flag for main loop processing
     ina226_alert_triggered = true;
 }
+
+// Safe read of encoder position (with interrupt protection)
+long get_encoder_position() {
+    long position;
+    cli();
+    position = encoder_position;
+    sei();
+    return position;
+}
+
 
 // Function to get identification letter for a given address
 uint8_t get_thermometer_letter(uint8_t addr[8]) {
@@ -231,6 +235,13 @@ void software_reboot() {
 
 void stop_motor()
 {
+	// Brief ramp-down to reduce voltage transients
+	for (int pwm = 255; pwm >= 0; pwm -= 51) {  // 5 steps over ~25ms
+		analogWrite(MOTOR_PWM_A_PIN, (motor_direction == 'U') ? pwm : 0);
+		analogWrite(MOTOR_PWM_B_PIN, (motor_direction == 'D') ? pwm : 0);
+		delay(5);
+	}
+	
 	digitalWrite(MOTOR_ENABLE_PIN, LOW);
 	analogWrite(MOTOR_PWM_A_PIN, 0);
 	analogWrite(MOTOR_PWM_B_PIN, 0);
@@ -242,7 +253,11 @@ void stop_motor()
 	// Put INA226 to sleep when motor stops
 	ina226_sleep();
 	
-	send_cover_status();
+	// Check if radio survived motor shutdown
+	delay(50);  // Let power settle
+	check_radio_config_at = millis();  // Force immediate config check
+	
+	send_next_status_at = millis();
 }
 
 void start_motor(char direction)
@@ -277,21 +292,21 @@ void start_motor(char direction)
 	ina226_wake();
 	
 	// Set target encoder position based on direction and limits
-	long current_pos = encoder_position;
+	long current_pos = get_encoder_position();
 	
 	if (direction == 'U') {
 		// Moving up - target is top position or current + default travel
 		if (has_marked_top) {
 			encoder_target_position = encoder_top_position;
 		} else {
-			encoder_target_position = current_pos - DEFAULT_TRAVEL_DISTANCE;
+			encoder_target_position = current_pos + DEFAULT_TRAVEL_DISTANCE;
 		}
 	} else { // direction == 'D'
 		// Moving down - target is bottom position or current + default travel
 		if (has_marked_bottom) {
 			encoder_target_position = encoder_bottom_position;
 		} else {
-			encoder_target_position = current_pos + DEFAULT_TRAVEL_DISTANCE;
+			encoder_target_position = current_pos - DEFAULT_TRAVEL_DISTANCE;
 		}
 	}
 	
@@ -338,6 +353,8 @@ int radio_send(uint8_t pipe_id, uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	radio.startListening();
 
 	if (!ok) {
+		// Radio send failed - trigger immediate config check
+		check_radio_config_at = millis();
 		return -1;
 	}
 #endif
@@ -352,34 +369,6 @@ uint16_t analog_to_millivolts(uint16_t analog_reading)
 	return (uint32_t)analog_reading * 3300 / 1024;
 }
 
-// Convert BTN7960B IS pin analog reading to motor current in milliamps
-// Using 10kΩ || 6.8kΩ = 4.05kΩ external resistor for 7A full-scale with 3.3V ADC
-// With 4.05kΩ external resistor and kILIS = 8500:
-// VIS = (IL / 8500) × 4050, so IL = VIS × 8500 / 4050 = VIS × 2.099 A/V
-uint16_t btn7960_analog_to_motor_current_ma(uint16_t analog_reading)
-{
-	// Convert ADC reading to voltage (mV)
-	uint16_t voltage_mv = analog_to_millivolts(analog_reading);
-	
-	// Convert voltage to current: IL = VIS × (8500/4050) A/V = VIS × 2.099 A/V
-	// IL(mA) = VIS(mV) × 2.099 = VIS(mV) × 2099 / 1000
-	uint32_t current_ma = (uint32_t)voltage_mv * 2099 / 1000;
-	
-	// With 4.05kΩ resistor (10kΩ || 6.8kΩ): 7A → 3.33V, optimal ADC usage
-	// ADC resolution: ~7.3mA per step
-	if (current_ma > 7500) current_ma = 7500;  // Safety margin
-	
-	return (uint16_t)current_ma;
-}
-
-// Read motor current from BTN7960B IS pin
-uint16_t read_motor_current_ma()
-{
-	uint16_t analog_reading = analogRead(MOTOR_CURRENT_PIN);
-	return btn7960_analog_to_motor_current_ma(analog_reading);
-}
-
-// Pool cover RF24 protocol functions
 void send_battery_voltage(uint16_t voltage_mv)
 {
 	radio_send(PIPE_POOL_COVER, 'V', voltage_mv & 0xFF, (voltage_mv >> 8) & 0xFF, 0);
@@ -434,7 +423,7 @@ void send_cover_status()
 	
 	// If motor is running, also send current encoder position
 	if (motor_running) {
-		send_encoder_position((uint32_t)encoder_position);
+		send_encoder_position((uint32_t)get_encoder_position());
 	}
 }
 
@@ -460,13 +449,13 @@ void process_cover_command(uint8_t cmd, uint8_t param1, uint8_t param2, uint8_t 
 			case 'M': // Mark travel limit
 				if (param2 == 'T') {
 					// Mark current position as top
-					encoder_top_position = encoder_position;
+					encoder_top_position = get_encoder_position();
 					has_marked_top = true;
 					Serial.print(F("Top marked at encoder position: "));
 					Serial.println(encoder_top_position);
 				} else if (param2 == 'D') {
 					// Mark current position as bottom
-					encoder_bottom_position = encoder_position;
+					encoder_bottom_position = get_encoder_position();
 					has_marked_bottom = true;
 					Serial.print(F("Bottom marked at encoder position: "));
 					Serial.println(encoder_bottom_position);
@@ -514,6 +503,141 @@ void check_radio_messages()
 	}
 #endif
 }
+
+// Radio configuration functions
+#if HAS_RF24
+void configure_radio() {
+	// Configure all radio settings
+	radio.setRetries(15, 15);
+	radio.setChannel(80);
+	radio.setCRCLength(RF24_CRC_16);
+	radio.setPayloadSize(4);
+	radio.setPALevel(RF24_PA_MAX);
+	radio.setDataRate(RF24_250KBPS);
+	radio.setAutoAck(true);
+	
+	// Setup both pipes for reading and writing
+	radio.openWritingPipe(pipe_address_temperature);
+	radio.openReadingPipe(PIPE_TEMPERATURE, pipe_address_temperature);
+	radio.openReadingPipe(PIPE_POOL_COVER, pipe_address_cover);
+	
+	// Enable interrupt ONLY on data received (RX_DR)
+	// maskIRQ(tx_ds, tx_fail, rx_ready) - 1=mask(disable), 0=enable
+	radio.maskIRQ(1, 1, 0); // Mask TX_DS and MAX_RT, enable RX_DR only
+	
+	radio.startListening();
+	radio.printDetails();
+}
+
+bool check_radio_configuration() {
+	uint8_t radio_details[43];
+	radio.encodeRadioDetails(radio_details);
+	/*
+	* | index | register/data |
+	* |------:|:--------------|
+	* | 0 |     NRF_CONFIG |
+	* | 1 |     EN_AA |
+	* | 2 |     EN_RXADDR |
+	* | 3 |     SETUP_AW |
+	* | 4 |     SETUP_RETR |
+	* | 5 |     RF_CH |
+	* | 6 |     RF_SETUP |
+	* | 7 |     NRF_STATUS |
+	* | 8 |     OBSERVE_TX |
+	* | 9 |     CD (aka RPD) |
+	* | 10-14 | RX_ADDR_P0 |
+	* | 15-19 | RX_ADDR_P1 |
+	* | 20 |    RX_ADDR_P2 |
+	* | 21 |    RX_ADDR_P3 |
+	* | 22 |    RX_ADDR_P4 |
+	* | 23 |    RX_ADDR_P5 |
+	* | 24-28 | TX_ADDR |
+	* | 29 |    RX_PW_P0 |
+	* | 30 |    RX_PW_P1 |
+	* | 31 |    RX_PW_P2 |
+	* | 32 |    RX_PW_P3 |
+	* | 33 |    RX_PW_P4 |
+	* | 34 |    RX_PW_P5 |
+	* | 35 |    FIFO_STATUS |
+	* | 36 |    DYNPD |
+	* | 37 |    FEATURE |
+	* | 38-39 | ce_pin |
+	* | 40-41 | csn_pin |
+	* | 42 |    SPI speed (in MHz) or'd with (isPlusVariant << 4) |
+	*/
+
+	// Check RF_CH register (array index 5)
+	if (radio_details[5] != 80) {
+		Serial.println(F("Radio config mismatch on RF_CH"));
+		goto mismatch;
+	}
+	
+	if (radio.getDataRate() != RF24_250KBPS) {
+		Serial.println(F("Radio config mismatch on data rate"));
+		goto mismatch;
+	}
+	
+	if (radio.getCRCLength() != RF24_CRC_16) {
+		Serial.println(F("Radio config mismatch on CRC length"));
+		goto mismatch;
+	}
+	
+	if (radio.getPALevel() != RF24_PA_MAX) {
+		Serial.println(F("Radio config mismatch on PA level"));
+		goto mismatch;
+	}
+	
+	// Check EN_RXADDR register (array index 2) - should enable pipes 1 and 4
+	// 0x12 = ERX_P1 (bit 1) | ERX_P4 (bit 4) = 0x02 | 0x10
+	if ((radio_details[2] & 0x12) != 0x12) {
+		Serial.println(F("Radio config mismatch on EN_RXADDR"));
+		goto mismatch;
+	}
+	
+	// Check RX_ADDR_P1 (array indices 15-19) - should match pipe_address_cover (0xF0F0F0F0F1LL)
+	uint64_t expected_cover_addr = pipe_address_cover;
+	for (int i = 0; i < 5; i++) {
+		uint8_t expected_byte = (expected_cover_addr >> (i * 8)) & 0xFF;
+		if (radio_details[15 + i] != expected_byte) {
+			Serial.println(F("Radio config mismatch on RX_ADDR_P1"));
+			goto mismatch;
+		}
+	}
+	
+	// Check RX_ADDR_P4 (array index 22) - should match last byte of pipe_address_temperature (0xF4)
+	uint8_t expected_temp_lsb = pipe_address_temperature & 0xFF;
+	if (radio_details[22] != expected_temp_lsb) {
+		Serial.println(F("Radio config mismatch on RX_ADDR_P4"));
+		goto mismatch;
+	}
+	
+	return true;
+
+mismatch:
+	radio.printDetails();
+	return false;
+}
+
+void reset_radio_configuration() {
+	Serial.println(F("Resetting radio"));
+	
+	// Stop listening first
+	radio.stopListening();
+	
+	// Power cycle the radio
+	radio.powerDown();
+	delay(10);
+	radio.powerUp();
+	delay(10);
+	
+	// Apply all radio configuration settings
+	configure_radio();
+	
+	// Send booting message
+	radio_send(PIPE_POOL_COVER, 'Q', 'b', 'r', 0);
+}
+
+#endif
 
 // INA226 identification functions
 uint16_t read_ina226_register(uint8_t reg_addr) {
@@ -569,7 +693,7 @@ void check_ina226_identification() {
 		if (device_id == 0x226) {
 			Serial.println(F(")"));
 		} else {
-			Serial.println(F(" - expected device ID 0x226)"));
+			Serial.println(F(" - expected devID 0x226)"));
 		}
 	}
 	
@@ -614,8 +738,11 @@ void setup(){
 	pinMode(ENCODER_CLK_PIN, INPUT_PULLUP);
 	pinMode(ENCODER_DT_PIN, INPUT_PULLUP);
 	
-	// Attach interrupt to encoder CLK pin
-	attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), encoder_interrupt, FALLING);
+	// Set up interrupts for encoder using KY040 library
+	// Use faster external interrupt for CLK pin (pin 2 supports INT0)
+	attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), encoder_interrupt_handler, CHANGE);
+	// Use pin change interrupt for DT pin (pin 4 doesn't support external interrupts)
+	attachPCINT(digitalPinToPCINT(ENCODER_DT_PIN), encoder_interrupt_handler, CHANGE);
 
 	// RF24 IRQ pin
 	pinMode(RF24_IRQ_PIN, INPUT_PULLUP); 
@@ -625,26 +752,10 @@ void setup(){
 	// Radio init
 	radio.begin();
 	radio.powerDown();
-	radio.setRetries(15, 15);
-	radio.setChannel(80);
-	radio.setCRCLength(RF24_CRC_16);
-	radio.setPayloadSize(4);
-	radio.setPALevel(RF24_PA_MAX);
-	radio.setDataRate(RF24_250KBPS);
- 	radio.setAutoAck(true);
 	
-	// Setup both pipes for reading and writing
-	radio.openWritingPipe(pipe_address_temperature);
-	radio.openReadingPipe(PIPE_TEMPERATURE, pipe_address_temperature);
-	radio.openReadingPipe(PIPE_POOL_COVER, pipe_address_cover);
-	
-	// Enable interrupt ONLY on data received (RX_DR)
-	// maskIRQ(tx_ds, tx_fail, rx_ready) - 1=mask(disable), 0=enable
-	radio.maskIRQ(1, 1, 0); // Mask TX_DS and MAX_RT, enable RX_DR only
-	
-	radio.startListening();
+	// Apply all radio configuration settings
+	configure_radio();
 
-	radio.printDetails();
 	
 	if ((radio.getDataRate() != RF24_250KBPS) ||
 		(radio.getCRCLength() != RF24_CRC_16) /*|| 
@@ -656,7 +767,6 @@ void setup(){
 
 	// Initialize I2C for INA226
 	Wire.begin();
-	Serial.println(F("I2C initialized"));
 	
 	// Initialize INA226
 	if (!ina226.begin()) {
@@ -689,16 +799,16 @@ void setup(){
 		
 		int cal_result = ina226.setMaxCurrentShunt(max_current, SHUNT_RESISTANCE_OHMS, true);
 		if (cal_result == 0) {
-			Serial.println(F("SUCCESS!"));
+			Serial.println(F("OK"));
 			
-			Serial.print(F("INA226 calibrated successfully. Current LSB: "));
+			Serial.print(F("INA226 calibrated. Current LSB: "));
 			Serial.print(ina226.getCurrentLSB_mA());
 			Serial.println(F(" mA"));
-			Serial.print(F("IMPORTANT: Current measurement range up to "));
+			Serial.print(F("Current measurement range up to "));
 			Serial.print(max_current);
 			Serial.print(F("A with "));
 			Serial.print(SHUNT_RESISTANCE_OHMS);
-			Serial.println(F("Ω shunt!"));
+			Serial.println(F("Ω shunt"));
 			
 			// Set conversion time for both shunt and bus voltage (default is fine)
 			// Enable continuous shunt and bus voltage monitoring
@@ -746,8 +856,6 @@ void loop()
 
 	// Drive motor
 	if (motor_running) {
-		check_radio_messages(); // Not needed most of the time, but I notice that when the motor is running, sometimes radio messages are missed. Let's see if this helps.
-
 		bool must_stop = false;
 		
 		// Check for INA226 alert (overcurrent)
@@ -803,18 +911,19 @@ void loop()
 			must_stop = true;
 		}
 		
+		long current_encoder_pos = get_encoder_position();
 		if (motor_direction == 'U') {
-			// Moving up - stop if we've reached or passed the target (going negative)
-			if (encoder_position <= encoder_target_position) {
+			// Moving up
+			if (current_encoder_pos >= encoder_target_position) {
 				Serial.print(F("Motor stopped: up position limit reached at "));
-				Serial.println(encoder_position);
+				Serial.println(current_encoder_pos);
 				must_stop = true;
 			}
 		} else { // motor_direction == 'D'
-			// Moving down - stop if we've reached or passed the target (going positive)
-			if (encoder_position >= encoder_target_position) {
+			// Moving down
+			if (current_encoder_pos <= encoder_target_position) {
 				Serial.print(F("Motor stopped: down position limit reached at "));
-				Serial.println(encoder_position);
+				Serial.println(current_encoder_pos);
 				must_stop = true;
 			}
 		}
@@ -868,7 +977,7 @@ void loop()
 			Serial.print(current_a, 3);
 			Serial.print(F("A"));
 			Serial.print(F(", "));
-			Serial.print(power_mw, 3);
+			Serial.print(power_mw);
 			Serial.println(F("mW"));
 			
 			// Put INA226 back to sleep if motor is not running
@@ -876,16 +985,6 @@ void loop()
 				ina226_sleep();
 			}
 		}
-		
-		// Read and send BTN7960B motor current (only when motor is running)
-		/*if (motor_running) {
-			uint16_t motor_current_ma = read_motor_current_ma();
-			send_motor_current(motor_current_ma);
-			
-			Serial.print("BTN7960B Motor Current: ");
-			Serial.print(motor_current_ma);
-			Serial.println(F("mA"));
-		}*/
 	}
 
 	// Send temperature
@@ -963,20 +1062,38 @@ void loop()
 			Serial.println("No DS18B20 thermometers found");
 		}
 	}
+	
+	// Monitor and reset radio configuration if corrupted by EMI
+#if HAS_RF24
+	if (millis() >= check_radio_config_at) {
+		unsigned long interval = motor_running ? RADIO_CONFIG_CHECK_INTERVAL_MOTOR : RADIO_CONFIG_CHECK_INTERVAL_IDLE;
+		check_radio_config_at = millis() + interval;
+		
+		if (!check_radio_configuration()) {
+			reset_radio_configuration();
+		}
+	}
+#endif
+
 
 	// Check for millis() overflow prevention reboot
 	if (millis() >= REBOOT_AT_MILLIS && !motor_running) {
 		software_reboot();
 	}
 
+
 	// Power management: calculate optimal sleep time
 	if (!motor_running && !radio_packet_received) {
 		// Calculate time until next required action
 		unsigned long current_time = millis();
-		unsigned long sleep_time_temeprature = send_next_temperature_at - current_time;
-		unsigned long sleep_time_status = send_next_status_at - current_time;
+		unsigned long sleep_time_temperature = send_next_temperature_at - current_time;
+		unsigned long sleep_time_status;
+		if (current_time > send_next_status_at)	
+			sleep_time_status = 0;
+		else 
+			sleep_time_status = send_next_status_at - current_time;
 
-		unsigned long sleep_time = min(sleep_time_temeprature, sleep_time_status);
+		unsigned long sleep_time = min(sleep_time_temperature, sleep_time_status);
 		
 		if (sleep_time > 32768L) { // Max 32 seconds sleep
 			sleep_time = 32768L;

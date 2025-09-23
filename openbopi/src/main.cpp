@@ -36,7 +36,7 @@ float airTemp = 0;
 float boxTemp = 0;
 float boxHumidity = 0;
 
-float orp_target = 680.0;  // Default ORP target
+float orp_target = 600.0;  // Default ORP target
 bool orp_regulation_enabled = false;
 unsigned long last_chlorine_injection = 0;
 unsigned long min_injection_interval = 5 * 60 * 1000;  // 5 minutes
@@ -234,7 +234,8 @@ void read_pH_ORP() {
     if (phValue == 0) {
         phValue = newPhValue;
     } else {
-        phValue = (9 * phValue + newPhValue) / 10;
+        // pH EMA is 1/30th to try to and dampen the noise
+        phValue = (29 * phValue + newPhValue) / 30;
     }
     
     // Read ORP from ADS1115 A0/1
@@ -242,7 +243,7 @@ void read_pH_ORP() {
     float newOrpValue = ads.computeVolts(adc0) * 1000.0;
 
     // Temperature-compensate ORP?
-    // The slope of my ORP probe is -1.34mV/°C
+    // The slope of my ORP probe is -1.37mV/°C
     // This is significant enough that the setpoint at 15°C and 25°C will
     // correspond to differing amounts of chlorine, but what is interesting is
     // that the negative slope means that at lower temperature (where we need
@@ -253,7 +254,8 @@ void read_pH_ORP() {
     // temps, but this is a direction of events which matches what we want to do
     // anyway (= put more chlorine when the water is hot and there are people
     // using the pool).
-    // newOrpValue += 1.34 * (20 - waterTemp);
+
+    // newOrpValue += 1.37 * (25 - waterTemp);
 
     // Filter ORP?
     // PoolMaster averages the 5 middle values in a buffer of 10, but takes 8
@@ -431,15 +433,15 @@ void checkORPRegulation() {
         }
         return;
     }
-    
-    if (phValue > 7.5) {
+   /* broken pH sensor so can't use this.. 
+    if (phValue > 8.5) {
         mqtt.publish("openbopi/status", "pH too high for chlorine injection: suspected problem");
         toggle_ORP_regulation(0);
         stop_pump(1);
         return;
-    }
+    }*/
 
-    if (orpValue < 400) {
+    if (orpValue < 350) {
         mqtt.publish("openbopi/status", "ORP abnormally low");
         toggle_ORP_regulation(0);
         stop_pump(1);
@@ -492,7 +494,14 @@ void setupWebServer() {
 
      server.on("/orp_target", HTTP_GET, [](AsyncWebServerRequest *request) {
         if (request->hasParam("value")) {
-            orp_target = request->getParam("value")->value().toFloat();
+            float requested_value = request->getParam("value")->value().toFloat();
+            if (requested_value >= 300 && requested_value <= 800) {  // Safe ORP range
+                orp_target = requested_value;
+                next_publish_at = millis();  // Trigger immediate publish
+            } else {
+                request->send(400, "text/plain", "Invalid ORP target value. Must be between 300 and 800.");
+                return;
+            }
         }
         request->send(200, "text/plain", "OK");
     });
@@ -502,6 +511,10 @@ void setupWebServer() {
             int time = request->getParam("value")->value().toInt();
             if (time > 0 && time <= 30) {  // Limit to 30 seconds max
                 chlorine_injection_time = time;
+                next_publish_at = millis();  // Trigger immediate publish
+            } else {
+                request->send(400, "text/plain", "Invalid injection time. Must be between 1 and 30 seconds.");
+                return;
             }
         }
         request->send(200, "text/plain", "OK");
@@ -512,6 +525,10 @@ void setupWebServer() {
             int interval_seconds = request->getParam("value")->value().toInt();
             if (interval_seconds >= 60 && interval_seconds <= 7200) {  // Between 1 minute and 2 hours in seconds
                 min_injection_interval = interval_seconds * 1000;
+                next_publish_at = millis();  // Trigger immediate publish
+            } else {
+                request->send(400, "text/plain", "Invalid injection interval. Must be between 60 and 7200 seconds.");
+                return;
             }
         }
         request->send(200, "text/plain", "OK");

@@ -253,9 +253,9 @@ void stop_motor()
 	// Put INA226 to sleep when motor stops
 	ina226_sleep();
 	
-	// Check if radio survived motor shutdown
+	// Check if radio and INA226 survived motor shutdown
 	delay(50);  // Let power settle
-	check_radio_config_at = millis();  // Force immediate config check
+	check_radio_config_at = millis();  // Force immediate config checks
 	
 	send_next_status_at = millis();
 }
@@ -353,7 +353,7 @@ int radio_send(uint8_t pipe_id, uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	radio.startListening();
 
 	if (!ok) {
-		// Radio send failed - trigger immediate config check
+		// Radio send failed - trigger immediate config checks (both radio and INA226)
 		check_radio_config_at = millis();
 		return -1;
 	}
@@ -718,6 +718,108 @@ void ina226_wake() {
 	}
 }
 
+// INA226 configuration verification functions
+bool check_ina226_configuration() {
+	if (!ina226_initialized) {
+		return false;
+	}
+	
+	// Check if calibration is still valid
+	// If calibration is lost, isCalibrated() will return false
+	if (!ina226.isCalibrated()) {
+		Serial.println(F("INA226 config mismatch: calibration lost"));
+		return false;
+	}
+	
+	return true;
+}
+
+// Helper function to configure INA226 with calibration and alerts
+bool configure_ina226() {
+	// Calculate max current based on INA226 library constraint
+	// Library checks: maxCurrent * shunt <= 0.08190V (81.90mV)
+	float max_current = 0.08190 / SHUNT_RESISTANCE_OHMS;  // Maximum current the library will accept
+	
+	Serial.print(F("Calibrating with max current: "));
+	Serial.print(max_current);
+	Serial.print(F("A with "));
+	Serial.print(SHUNT_RESISTANCE_OHMS);
+	Serial.print(F(" ohm shunt... "));
+	
+	int cal_result = ina226.setMaxCurrentShunt(max_current, SHUNT_RESISTANCE_OHMS, true);
+	if (cal_result != 0) {
+		Serial.print(F("FAILED (0x"));
+		Serial.print(cal_result, HEX);
+		Serial.println(F(")"));
+		return false;
+	}
+	
+	Serial.println(F("OK"));
+	
+	Serial.print(F("INA226 calibrated. Current LSB: "));
+	Serial.print(ina226.getCurrentLSB_mA());
+	Serial.println(F(" mA"));
+	Serial.print(F("Current measurement range up to "));
+	Serial.print(max_current);
+	Serial.print(F("A with "));
+	Serial.print(SHUNT_RESISTANCE_OHMS);
+	Serial.println(F("Ω shunt"));
+	
+	// Set conversion time for both shunt and bus voltage (default is fine)
+	// Enable continuous shunt and bus voltage monitoring
+	ina226.setModeShuntBusContinuous();
+	
+	// Configure alert for overcurrent detection (6.0A threshold)
+	// Calculate alert limit: I_alert * R_shunt / LSB_shunt_voltage
+	// INA226 shunt voltage register LSB is 2.5µV
+	float alert_current = 6.0;  // Alert at 6.0A
+	uint16_t alert_limit = (alert_current * SHUNT_RESISTANCE_OHMS) / INA226_SHUNT_VOLTAGE_LSB;  // Convert to register counts
+	if (!ina226.setAlertLimit(alert_limit)) {
+		Serial.println(F("ERROR: Failed to set INA226 alert limit"));
+		return false;
+	}
+	
+	// Configure alert register for shunt overvoltage (overcurrent)
+	if (!ina226.setAlertRegister(INA226_SHUNT_OVER_VOLTAGE)) {
+		Serial.println(F("ERROR: Failed to configure INA226 alert register"));
+		return false;
+	}
+	
+	Serial.print(F("INA226 alert configured for overcurrent at "));
+	Serial.print(OVERCURRENT_THRESHOLD);
+	Serial.println(F("A"));
+	
+	return true;
+}
+
+void reset_ina226_configuration() {
+	Serial.println(F("Resetting INA226 configuration"));
+	
+	if (!ina226_initialized) {
+		Serial.println(F("ERROR: INA226 not initialized, cannot reset"));
+		return;
+	}
+	
+	// Re-initialize the INA226 using library methods
+	if (!ina226.begin()) {
+		Serial.println(F("ERROR: Failed to re-initialize INA226"));
+		ina226_initialized = false;
+		return;
+	}
+	
+	// Reconfigure using helper function
+	if (!configure_ina226()) {
+		Serial.println(F("ERROR: INA226 reconfiguration failed"));
+		ina226_initialized = false;
+		return;
+	}
+	
+	Serial.println(F("INA226 configuration restored"));
+	
+	// Send a status update to indicate INA226 was reset
+	XXXfixmeradio_send(PIPE_POOL_COVER, 'Q', 'i', 'r', 0);  // 'i'na226 'r'eset
+}
+
 void setup(){
 	printf_begin();
 	Serial.begin(115200);
@@ -787,55 +889,8 @@ void setup(){
 	if (ina226_initialized) {
 		Serial.println(F("Configuring INA226..."));
 		
-		// Calculate max current based on INA226 library constraint
-		// Library checks: maxCurrent * shunt <= 0.08190V (81.90mV)
-		float max_current = 0.08190 / SHUNT_RESISTANCE_OHMS;  // Maximum current the library will accept
-		
-		Serial.print(F("Calibrating with max current: "));
-		Serial.print(max_current);
-		Serial.print(F("A with "));
-		Serial.print(SHUNT_RESISTANCE_OHMS);
-		Serial.print(F(" ohm shunt... "));
-		
-		int cal_result = ina226.setMaxCurrentShunt(max_current, SHUNT_RESISTANCE_OHMS, true);
-		if (cal_result == 0) {
-			Serial.println(F("OK"));
-			
-			Serial.print(F("INA226 calibrated. Current LSB: "));
-			Serial.print(ina226.getCurrentLSB_mA());
-			Serial.println(F(" mA"));
-			Serial.print(F("Current measurement range up to "));
-			Serial.print(max_current);
-			Serial.print(F("A with "));
-			Serial.print(SHUNT_RESISTANCE_OHMS);
-			Serial.println(F("Ω shunt"));
-			
-			// Set conversion time for both shunt and bus voltage (default is fine)
-			// Enable continuous shunt and bus voltage monitoring
-			ina226.setModeShuntBusContinuous();
-			
-			// Configure alert for overcurrent detection (6.0A threshold)
-			// Calculate alert limit: I_alert * R_shunt / LSB_shunt_voltage
-			// INA226 shunt voltage register LSB is 2.5µV
-			float alert_current = 6.0;  // Alert at 6.0A
-			uint16_t alert_limit = (alert_current * SHUNT_RESISTANCE_OHMS) / INA226_SHUNT_VOLTAGE_LSB;  // Convert to register counts
-			if (!ina226.setAlertLimit(alert_limit)) {
-				Serial.println(F("ERROR: Failed to set INA226 alert limit"));
-			}
-			
-			// Configure alert register for shunt overvoltage (overcurrent)
-			if (!ina226.setAlertRegister(INA226_SHUNT_OVER_VOLTAGE)) {
-				Serial.println(F("ERROR: Failed to configure INA226 alert register"));
-			} else {
-				Serial.print(F("INA226 alert configured for overcurrent at "));
-				Serial.print(OVERCURRENT_THRESHOLD);
-				Serial.println(F("A"));
-			}
-		} else {
-			Serial.print(F("FAILED (0x"));
-			Serial.print(cal_result, HEX);
-			Serial.println(F(")"));
-			Serial.println(F("ERROR: INA226 calibration failed"));
+		if (!configure_ina226()) {
+			Serial.println(F("ERROR: INA226 configuration failed"));
 			ina226_initialized = false;
 			init_failed = 1;
 		}
@@ -1063,7 +1118,7 @@ void loop()
 		}
 	}
 	
-	// Monitor and reset radio configuration if corrupted by EMI
+	// Monitor and reset radio/INA226 configuration if corrupted by EMI
 #if HAS_RF24
 	if (millis() >= check_radio_config_at) {
 		unsigned long interval = motor_running ? RADIO_CONFIG_CHECK_INTERVAL_MOTOR : RADIO_CONFIG_CHECK_INTERVAL_IDLE;
@@ -1071,6 +1126,11 @@ void loop()
 		
 		if (!check_radio_configuration()) {
 			reset_radio_configuration();
+		}
+		
+		// Check INA226 configuration at the same time
+		if (!check_ina226_configuration()) {
+			reset_ina226_configuration();
 		}
 	}
 #endif

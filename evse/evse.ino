@@ -28,6 +28,7 @@ bool charging = false;
 float maxCurrent;
 bool throttlingCurrent;
 uint32_t throttling_current_until = 0;
+bool inHeuresCreuses = false;  // Track if we're in off-peak hours
 
 // Add these variables for storing log messages
 char pendingLogMessage[255] = "";
@@ -181,6 +182,10 @@ const char INDEX_HTML[] PROGMEM = R"=====(
   <tr>
     <td>2009 Boot Firmware</td>
     <td>%BOOT_FW%</td>
+  </tr>
+  <tr>
+    <td>Heures Creuses Status</td>
+    <td>%HEURES_CREUSES%</td>
   </tr>
 </table>
 
@@ -381,7 +386,11 @@ void setupMQTT() {
         if (val < 0 || val > 10000) {
             return;
         }
-        
+       
+        if (!charging) {
+          return;
+        }
+
         float headRoom = 6900 - val;
         if (headRoom > 500) {
             // Got enough headroom, no need to throttle
@@ -426,18 +435,18 @@ void setupMQTT() {
                 return;
             }
 
-            last_period_type = period;
-
             /* PJB PJR PJW, CJB CJR CJW */
             if (period == 'C') {
+                inHeuresCreuses = true;
                 queue_log_message("Entering Heure Creuse, starting charge");
                 startCharging();
-                return;
             } else if (last_period_type == 'C') {
+                inHeuresCreuses = false;
                 queue_log_message("Leaving Heure Creuse, stopping charge");
                 stopCharging();
-                return;
             }
+            
+            last_period_type = period;
     });
 
     mqtt.begin();
@@ -557,6 +566,7 @@ void setupWebServer() {
         html.replace("%PP_DETECTION%", String(evseRegs.ppDetection));
         html.replace("%REG2008%", String(evseRegs.reg2008, HEX));
         html.replace("%BOOT_FW%", String(evseRegs.bootFirmware));
+        html.replace("%HEURES_CREUSES%", inHeuresCreuses ? "ACTIVE" : "INACTIVE");
         server.send(200, "text/html", html);
     });
 
@@ -592,7 +602,8 @@ void setupWebServer() {
         json += "\"reg2014\":" + String(evseRegs.reg2014) + ",";
         json += "\"reg2015\":" + String(evseRegs.reg2015) + ",";
         json += "\"reg2016\":" + String(evseRegs.reg2016) + ",";
-        json += "\"reg2017\":" + String(evseRegs.reg2017);
+        json += "\"reg2017\":" + String(evseRegs.reg2017) + ",";
+        json += "\"inHeuresCreuses\":" + String(inHeuresCreuses ? "true" : "false");
         json += "}";
         server.send(200, "application/json", json);
     });
@@ -691,7 +702,7 @@ void setup() {
     // Minimal current for this car is 5A
     writeRegister(2002, 5);
    
-    startCharging();
+    stopCharging();
 
     queue_log_message("Svenvse started");
 }
@@ -764,9 +775,9 @@ void loop() {
     }
 
     // State transition: an EV was just plugged in, start charge
-    if (evseRegs.vehicleState == VEHICLE_EV_PRESENT && oldEvseRegs.vehicleState == VEHICLE_EVSE_READY) {
+/*    if (evseRegs.vehicleState == VEHICLE_EV_PRESENT && oldEvseRegs.vehicleState == VEHICLE_EVSE_READY) {
         startCharging();
-    }
+    }*/
 
     // Regular status updates
     if (millis() > next_publish_at) {
@@ -777,14 +788,18 @@ void loop() {
     // Check ADPS timeout
     if (adpsStopUntil > 0 && millis() > adpsStopUntil) {
         adpsStopUntil = 0;
-        startCharging();
+        if (inHeuresCreuses) {
+            startCharging();
+        } else {
+            queue_log_message("ADPS timeout expired but not in heures creuses - not restarting");
+        }
     }
     
     // Reboot on overflow
     const unsigned long REBOOT_AT_MILLIS = 4200000000UL;  // Reboot at ~48.6 days, safely before overflow at 49.7 days
     if (millis() > REBOOT_AT_MILLIS) {
         Serial.println("Approaching millis() overflow, rebooting...");
-        mqtt.publish("openbopi/status", "Rebooting due to millis() overflow prevention");
+        mqtt.publish("svevse/log", "Rebooting due to millis() overflow prevention");
         delay(100);  // Allow time for MQTT message to be sent
         ESP.restart();
     }

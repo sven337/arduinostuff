@@ -64,7 +64,7 @@ const int ENCODER_DT_PIN = 4;   // Direction pin (DT)
 
 
 OneWire ds(DS18B20_PIN);
-const uint8_t INA226_I2C_ADDRESS = 0x44;
+const uint8_t INA226_I2C_ADDRESS = 0x40;
 INA226 ina226(INA226_I2C_ADDRESS); 
 
 // KY-040 Encoder object
@@ -87,8 +87,8 @@ const uint64_t pipe_address_temperature = 0xF0F0F0F0F4LL;
 #define PIPE_TEMPERATURE 4
 #endif
 
-static unsigned long motor_duration_up = 10 * 60 * 1000UL; // 10 minutes for up
-static unsigned long motor_duration_down = 430 * 1000UL; // 7 minutes 10 seconds for down
+static unsigned long motor_duration_up = (10 * 60 + 30) * 1000UL; // 10 minutes 30 seconds for up
+static unsigned long motor_duration_down = 8 * 60 * 1000UL; // max 8 minutes for down
 static unsigned long motor_stop_at = 0;
 static bool motor_running = false;
 static char motor_direction = 'U';
@@ -147,7 +147,7 @@ const uint8_t num_known_thermometers = sizeof(thermometer_letter_from_addr) / si
 const float INA226_VOLTAGE_CORRECTION = 1.0542f;
 
 // INA226 hardware constants
-const float SHUNT_RESISTANCE_OHMS = 0.012f;       // 12 milliohm shunt (R012)
+const float SHUNT_RESISTANCE_OHMS = 0.010f;       // 10 milliohm shunt (R010)
 const float INA226_SHUNT_VOLTAGE_LSB = 0.0000025f; // 2.5µV per LSB for shunt voltage register
 
 // Encoder interrupt handler for KY040 library (shared by both interrupt types)
@@ -298,6 +298,10 @@ void start_motor(char direction)
 		// Moving up - target is top position or current + default travel
 		if (has_marked_top) {
 			encoder_target_position = encoder_top_position;
+			if (current_pos >= encoder_target_position) {
+				// Already at the "top" position? Add 1
+				encoder_target_position = current_pos + 1;
+			}
 		} else {
 			encoder_target_position = current_pos + DEFAULT_TRAVEL_DISTANCE;
 		}
@@ -305,13 +309,17 @@ void start_motor(char direction)
 		// Moving down - target is bottom position or current + default travel
 		if (has_marked_bottom) {
 			encoder_target_position = encoder_bottom_position;
+			if (current_pos <= encoder_target_position) {
+				// Already at the "bottom" position? Remove 1
+				encoder_target_position = current_pos - 1;
+			}
 		} else {
 			encoder_target_position = current_pos - DEFAULT_TRAVEL_DISTANCE;
 		}
 	}
 	
 	send_cover_status();
-	// Start 15-second cycle for frequent updates while motor running
+	// Start 5-second cycle for frequent updates while motor running
 	send_next_status_at = millis() + 5000LL;
 }
 
@@ -657,49 +665,6 @@ uint16_t read_ina226_register(uint8_t reg_addr) {
 	return value;
 }
 
-void check_ina226_identification() {
-	Serial.println(F("Reading INA226 identification registers..."));
-	
-	// Read Manufacturer ID register (0xFE)
-	uint16_t manufacturer_id = read_ina226_register(0xFE);
-	Serial.print(F("Manufacturer ID (0xFE): 0x"));
-	Serial.print(manufacturer_id, HEX);
-	
-	if (manufacturer_id == 0x5449) {
-		Serial.println(F(" (Texas Instruments)"));
-	} else if (manufacturer_id == 0xFFFF) {
-		Serial.println(F(" - read error"));
-	} else {
-		Serial.println(F(" - unexpected value, expected 0x5449"));
-	}
-	
-	// Read Die ID register (0xFF)
-	uint16_t die_id = read_ina226_register(0xFF);
-	Serial.print(F("Die ID (0xFF): 0x"));
-	Serial.print(die_id, HEX);
-	
-	if (die_id == 0xFFFF) {
-		Serial.println(F(" - read error"));
-	} else {
-		// Extract device ID (bits 15-4) and die revision (bits 3-0)
-		uint16_t device_id = (die_id >> 4) & 0x0FFF;
-		uint8_t die_revision = die_id & 0x0F;
-		
-		Serial.print(F(" (Device ID: 0x"));
-		Serial.print(device_id, HEX);
-		Serial.print(F(", Die Rev: 0x"));
-		Serial.print(die_revision, HEX);
-		
-		if (device_id == 0x226) {
-			Serial.println(F(")"));
-		} else {
-			Serial.println(F(" - expected devID 0x226)"));
-		}
-	}
-	
-	Serial.println();
-}
-
 // INA226 power management functions
 void ina226_sleep() {
 	if (ina226_initialized && ina226.isCalibrated()) {
@@ -718,22 +683,6 @@ void ina226_wake() {
 	}
 }
 
-// INA226 configuration verification functions
-bool check_ina226_configuration() {
-	if (!ina226_initialized) {
-		return false;
-	}
-	
-	// Check if calibration is still valid
-	// If calibration is lost, isCalibrated() will return false
-	if (!ina226.isCalibrated()) {
-		Serial.println(F("INA226 config mismatch: calibration lost"));
-		return false;
-	}
-	
-	return true;
-}
-
 // Helper function to configure INA226 with calibration and alerts
 bool configure_ina226() {
 	// Calculate max current based on INA226 library constraint
@@ -743,7 +692,7 @@ bool configure_ina226() {
 	Serial.print(F("Calibrating with max current: "));
 	Serial.print(max_current);
 	Serial.print(F("A with "));
-	Serial.print(SHUNT_RESISTANCE_OHMS);
+	Serial.print(SHUNT_RESISTANCE_OHMS, 4);
 	Serial.print(F(" ohm shunt... "));
 	
 	int cal_result = ina226.setMaxCurrentShunt(max_current, SHUNT_RESISTANCE_OHMS, true);
@@ -790,34 +739,6 @@ bool configure_ina226() {
 	Serial.println(F("A"));
 	
 	return true;
-}
-
-void reset_ina226_configuration() {
-	Serial.println(F("Resetting INA226 configuration"));
-	
-	if (!ina226_initialized) {
-		Serial.println(F("ERROR: INA226 not initialized, cannot reset"));
-		return;
-	}
-	
-	// Re-initialize the INA226 using library methods
-	if (!ina226.begin()) {
-		Serial.println(F("ERROR: Failed to re-initialize INA226"));
-		ina226_initialized = false;
-		return;
-	}
-	
-	// Reconfigure using helper function
-	if (!configure_ina226()) {
-		Serial.println(F("ERROR: INA226 reconfiguration failed"));
-		ina226_initialized = false;
-		return;
-	}
-	
-	Serial.println(F("INA226 configuration restored"));
-	
-	// Send a status update to indicate INA226 was reset
-	XXXfixmeradio_send(PIPE_POOL_COVER, 'Q', 'i', 'r', 0);  // 'i'na226 'r'eset
 }
 
 void setup(){
@@ -880,9 +801,6 @@ void setup(){
 		Serial.print(F("INA226 initialized successfully at 0x"));
 		Serial.println(INA226_I2C_ADDRESS, HEX);
 		ina226_initialized = true;
-		
-		// Check INA226 identification to verify authenticity
-		check_ina226_identification();
 	}
 	
 	// Configure INA226 if it was successfully initialized
@@ -914,7 +832,7 @@ void loop()
 		bool must_stop = false;
 		
 		// Check for INA226 alert (overcurrent)
-		if (ina226_initialized && ina226_alert_triggered) {
+		if (0 && ina226_initialized && ina226_alert_triggered) {
 			ina226_alert_triggered = false; // Clear flag
 			
 			// Read current to confirm and get exact value
@@ -938,7 +856,7 @@ void loop()
 		}
 		
 		// Check overcurrent timer if overcurrent was detected
-		if (overcurrent_detected) {
+		if (0 && overcurrent_detected) {
 			float current_a = ina226.getCurrent();
 			
 			if (current_a >= OVERCURRENT_THRESHOLD) {
@@ -993,7 +911,7 @@ void loop()
 		if (motor_running) {
 			send_next_status_at = millis() + 5000LL;
 		} else {
-			send_next_status_at = millis() + 15 * 60 * 1000LL; // 15 minutes
+			send_next_status_at = millis() + 60 * 60 * 1000LL; // 1 hour
 		}
 		send_cover_status();
 		
@@ -1127,46 +1045,53 @@ void loop()
 		if (!check_radio_configuration()) {
 			reset_radio_configuration();
 		}
-		
-		// Check INA226 configuration at the same time
-		if (!check_ina226_configuration()) {
-			reset_ina226_configuration();
-		}
 	}
 #endif
-
 
 	// Check for millis() overflow prevention reboot
 	if (millis() >= REBOOT_AT_MILLIS && !motor_running) {
 		software_reboot();
 	}
 
+	if (radio_packet_received) {
+		return;
+	}
 
-	// Power management: calculate optimal sleep time
-	if (!motor_running && !radio_packet_received) {
-		// Calculate time until next required action
-		unsigned long current_time = millis();
-		unsigned long sleep_time_temperature = send_next_temperature_at - current_time;
-		unsigned long sleep_time_status;
-		if (current_time > send_next_status_at)	
-			sleep_time_status = 0;
-		else 
-			sleep_time_status = send_next_status_at - current_time;
+	// Power management: sleep
+	// Calculate time until next required action
+	unsigned long now = millis();
+	unsigned long sleep_until;
+	
+	if (send_next_temperature_at > send_next_status_at) {
+		sleep_until = send_next_status_at;
+	} else {
+		sleep_until = send_next_temperature_at;
+	}
 
-		unsigned long sleep_time = min(sleep_time_temperature, sleep_time_status);
-		
-		if (sleep_time > 32768L) { // Max 32 seconds sleep
-			sleep_time = 32768L;
-		} else if (sleep_time < 128L) { // Min 128ms sleep
-			sleep_time = 128L;
+	if (motor_running) {
+		sleep_until = now;
+	}
+
+	if (sleep_until <= now) {
+		// No sleep needed, we are already past the next required action
+		return;
+	}
+
+	unsigned long sleep_duration = sleep_until - now;
+	Serial.print("Sleeping for ");
+	Serial.print(sleep_duration);
+	Serial.println("ms");
+	Serial.flush();
+	while (sleep_duration > 32768L) {
+		Sleepy::loseSomeTime(32768L);
+		if (radio_packet_received) {
+			return;
 		}
-		
-		// Sleep for calculated time (power saving)
-		Serial.print("Sleeping for ");
-		Serial.print(sleep_time);
-		Serial.println("ms");
-		Serial.flush();
-		Sleepy::loseSomeTime(sleep_time);
+		sleep_duration -= 32768L;
+	}
+
+	if (sleep_duration > 0) {
+		Sleepy::loseSomeTime(sleep_duration);
 	}
 }
 

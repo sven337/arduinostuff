@@ -17,7 +17,7 @@ ModbusMaster s8modbus;
 
 int last_co2_value;
 unsigned long lastCo2ReadTime = 0;
-const unsigned long READ_INTERVAL = 15000;  // 15 seconds
+const unsigned long READ_INTERVAL = 60000;  // 15 seconds
         
 unsigned long publishStaticRegsAt = 0;
 

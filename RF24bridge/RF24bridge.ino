@@ -12,6 +12,7 @@ const int DS18B20_PIN = 7;
 // XXX pipe 1 must always be used otherwise the others are broken since their
 // address is defined as pipe1's except for the least significant byte
 #define PIPE_POOL_COVER_ID 1
+#define PIPE_GATE_OPENER_ID 2
 #define PIPE_LINKY_ID 3
 #define PIPE_THERMOMETER_ID 4
 
@@ -20,6 +21,7 @@ struct pipes {
     uint64_t addr;
 } pipes[] = {
     {PIPE_POOL_COVER_ID, 0xF0F0F0F0F1LL},
+    {PIPE_GATE_OPENER_ID, 0xF0F0F0F0F2LL},
     {PIPE_LINKY_ID, 0xF0F0F0F0F3LL},
     {PIPE_THERMOMETER_ID, 0xF0F0F0F0F4LL},
 };

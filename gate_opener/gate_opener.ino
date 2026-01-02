@@ -260,31 +260,33 @@ void send_gate_status()
 	radio_send(PIPE_GATE, 'Q', gate_action, 0, 0); 
 }
 
-void process_gate_command(uint8_t cmd, uint8_t param1, uint8_t param2, uint8_t param3)
+void process_gate_command(uint8_t p0, uint8_t cmd)
 {
 	Serial.print(F("Gate command: "));
-	Serial.print((char)cmd);
+	Serial.print((char)p0);
 	Serial.print(F(" "));
-	Serial.print((char)param1);
+	Serial.print((char)cmd);
 	Serial.println();
-	
-	if (cmd == 'G') { // Gate command
-		switch (param1) {
-			case 'O': // Open
-				open_gate();
-				break;
-			case 'C': // Close
-				close_gate();
-				break;
-			case 'S': // Stop
-				stop_gate();
-				break;
-			case 'Q': // Query status
-				// Fall through to send_next_status_at override below
-				break;
-		}
-		send_next_status_at = millis();
+
+	if (p0 != 'G') {
+		return;
 	}
+
+	switch (cmd) {
+		case 'O': // Open
+			open_gate();
+			break;
+		case 'C': // Close
+			close_gate();
+			break;
+		case 'S': // Stop
+			stop_gate();
+			break;
+		case 'Q': // Query status
+			// Fall through to send_next_status_at override below
+			break;
+	}
+	send_next_status_at = millis();
 }
 
 void check_radio_messages()
@@ -299,7 +301,7 @@ void check_radio_messages()
 		packet_processed = true;
 		
 		if (pipe_num == PIPE_GATE) {
-			process_gate_command(payload[0], payload[1], payload[2], payload[3]);
+			process_gate_command(payload[0], payload[1]);
 		}
 	}
 	
@@ -402,9 +404,8 @@ bool check_radio_configuration() {
 	}
 	
 	// Check RX_ADDR_P1 (array indices 15-19) - should match pipe_address_gate
-	uint64_t expected_gate_addr = pipe_address_gate;
 	for (int i = 0; i < 5; i++) {
-		uint8_t expected_byte = (expected_gate_addr >> (i * 8)) & 0xFF;
+		uint8_t expected_byte = (pipe_address_gate >> (i * 8)) & 0xFF;
 		if (radio_details[15 + i] != expected_byte) {
 			Serial.println(F("Radio config mismatch on RX_ADDR_P1"));
 			goto mismatch;
@@ -605,12 +606,12 @@ void setup(){
 	pinMode(GATE_LED_CLOSING, INPUT);
 	
 	// Attach interrupts to gate status pins for change detection
-	attachInterrupt(digitalPinToInterrupt(GATE_LED_OPENING), gate_opening_interrupt, CHANGE);
-	attachPCINT(digitalPinToPCINT(GATE_LED_CLOSING), gate_closing_interrupt, CHANGE);
+	attachInterrupt(digitalPinToInterrupt(GATE_LED_OPENING), gate_moving_interrupt, CHANGE);
+	attachPCINT(digitalPinToPCINT(GATE_LED_CLOSING), gate_moving_interrupt, CHANGE);
 	
 	// Read initial states
-	gate_opening_active = (digitalRead(GATE_LED_OPENING) == LOW);
-	gate_closing_active = (digitalRead(GATE_LED_CLOSING) == LOW);
+	gate_opening = (digitalRead(GATE_LED_OPENING) == LOW);
+	gate_closing = (digitalRead(GATE_LED_CLOSING) == LOW);
 
 	// INA226 alert pin
 	pinMode(INA226_ALERT_PIN, INPUT_PULLUP);

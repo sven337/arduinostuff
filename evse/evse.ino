@@ -6,6 +6,7 @@
 #include "wifi_params.h"
 #include "mqtt_login.h"
 #include <ArduinoOTA.h>
+#include <time.h>  // For NTP time synchronization
 
 #define REG_CURRENT_CONFIG 1000  // Configured current
 #define REG_CONFIG        2005  // Configuration register
@@ -29,25 +30,104 @@ float maxCurrent;
 bool throttlingCurrent;
 uint32_t throttling_current_until = 0;
 bool inHeuresCreuses = false;  // Track if we're in off-peak hours
+bool inPJR = false;  // Track if we're in PJR (peak red)
 
-// Add these variables for storing log messages
-char pendingLogMessage[255] = "";
-bool logMessagePending = false;
+// NTP and scheduled charging variables
+bool ntpSynced = false;
+const float PRECONDITIONING_CURRENT = 6.0;  // 6A for cabin pre-conditioning
 
-// Function to queue a log message for publishing in the main loop
-void queue_log_message(const char* message) {
-  strncpy(pendingLogMessage, message, sizeof(pendingLogMessage) - 1);
-  pendingLogMessage[sizeof(pendingLogMessage) - 1] = '\0'; // Ensure null termination
-  logMessagePending = true;
+// FIFO circular buffer for log messages
+// Each message is null-terminated in the buffer
+char logMessageBuffer[512];
+char *logBufferEnd = logMessageBuffer + sizeof(logMessageBuffer);
+char * volatile logBufferReadPtr = logMessageBuffer;
+char * volatile logBufferWritePtr = logMessageBuffer;
+
+// Wrap pointer to stay within buffer bounds
+char *logBufferWrap(char *ptr) {
+  return (ptr >= logBufferEnd) ? logMessageBuffer : ptr;
 }
 
-// Overload for formatted messages
-void queue_log_message_fmt(const char* format, ...) {
+// Returns available space for writing (leaving 1 byte to distinguish full from empty)
+size_t logBufferFreeSpace() {
+  if (logBufferWritePtr >= logBufferReadPtr) {
+    return sizeof(logMessageBuffer) - 1 - (logBufferWritePtr - logBufferReadPtr);
+  } else {
+    return logBufferReadPtr - logBufferWritePtr - 1;
+  }
+}
+
+// Check if buffer has pending messages
+bool logBufferHasData() {
+  return logBufferReadPtr != logBufferWritePtr;
+}
+
+// Write a null-terminated message to the circular buffer
+// If buffer is nearly full, truncates message to fit available space
+void logBufferWrite(const char *msg) {
+  size_t msgLen = strlen(msg);
+  if (msgLen == 0) return;
+  
+  size_t available = logBufferFreeSpace();
+  if (available < 2) {
+    // Need at least 2 bytes (1 char + null terminator)
+    return;
+  }
+  
+  // Truncate message if necessary (leave room for null terminator)
+  size_t writeLen = (msgLen < available) ? msgLen : (available - 1);
+  
+  // Copy message byte by byte, wrapping around
+  for (size_t i = 0; i < writeLen; i++) {
+    *logBufferWritePtr = msg[i];
+    logBufferWritePtr = logBufferWrap(logBufferWritePtr + 1);
+  }
+  
+  // Write null terminator
+  *logBufferWritePtr = '\0';
+  logBufferWritePtr = logBufferWrap(logBufferWritePtr + 1);
+}
+
+// Read one null-terminated message from the circular buffer
+// Returns pointer to static buffer, or NULL if no message available
+const char *logBufferRead() {
+  static char readBuffer[256];  // Max single message size
+  
+  if (!logBufferHasData()) {
+    return NULL;
+  }
+  
+  size_t i = 0;
+  while (logBufferReadPtr != logBufferWritePtr && i < sizeof(readBuffer) - 1) {
+    char c = *logBufferReadPtr;
+    logBufferReadPtr = logBufferWrap(logBufferReadPtr + 1);
+    
+    if (c == '\0') {
+      // End of this message
+      readBuffer[i] = '\0';
+      return readBuffer;
+    }
+    readBuffer[i++] = c;
+  }
+  
+  // Reached end of buffer or max size without null terminator
+  readBuffer[i] = '\0';
+  return (i > 0) ? readBuffer : NULL;
+}
+
+// Queue a log message for publishing in the main loop
+void queue_log_message(const char *message) {
+  logBufferWrite(message);
+}
+
+// Queue a formatted log message
+void queue_log_message_fmt(const char *format, ...) {
+  char tempBuffer[256];
   va_list args;
   va_start(args, format);
-  vsnprintf(pendingLogMessage, sizeof(pendingLogMessage) - 1, format, args);
+  vsnprintf(tempBuffer, sizeof(tempBuffer), format, args);
   va_end(args);
-  logMessagePending = true;
+  logBufferWrite(tempBuffer);
 }
 
 // HTML template
@@ -186,6 +266,14 @@ const char INDEX_HTML[] PROGMEM = R"=====(
   <tr>
     <td>Heures Creuses Status</td>
     <td>%HEURES_CREUSES%</td>
+  </tr>
+  <tr>
+    <td>PJR Status (Peak Red - Blocks ALL charging)</td>
+    <td>%PJR_STATUS%</td>
+  </tr>
+  <tr>
+    <td>Current Time</td>
+    <td>%CURRENT_TIME%</td>
   </tr>
 </table>
 
@@ -425,16 +513,19 @@ void setupMQTT() {
             static uint8_t last_period_type = 0;
             char period = payload[0];
 
+            // Track PJR state - PJR blocks all charging
+            inPJR = !strcmp(payload, "PJR");
+            
             // Block charging in PJR. Partially redundant with the below, but I've had misses
-            if (charging && !strcmp(payload, "PJR")) {
+            if (charging && inPJR) {
                 queue_log_message("In PJR, stopping charge");
                 stopCharging();
             }
-
+            
             if (period == last_period_type) {
                 return;
             }
-
+            
             /* PJB PJR PJW, CJB CJR CJW */
             if (period == 'C') {
                 inHeuresCreuses = true;
@@ -459,59 +550,80 @@ void writeRegister(int reg, uint16_t val)
     evse.writeMultipleRegisters(reg, 1);
 }
 
-void writeConfigBit(uint8_t bit)
+void writeConfigBit(uint8_t mode)
 {
-    uint16_t config = 1 << 5 | 1 << 7 | 1 << 9 | 1 << bit;
+    // Base config: bits 5, 7, 9 always set
+    // Bit 5: Auto clear RCD error
+    // Bit 7: PWM debug bit
+    // Bit 9: Pilot auto recover delay
+    uint16_t config = 1 << 5 | 1 << 7 | 1 << 9;
+
     /*
-       bit0: Enable button for current change (no sense when
-2003 = 0)
-0: disabled
-1: enabled (default)
-bit1: Stop charging when button pressed
-0: disabled (default)
-1: enabled
-charging will automatically start after you manually unplug and
-plug the cable to the vehicle
-bit2: Pilot ready state LED
-0: blinks once (default)
-1: is always ON
-bit3: enable charging on vehicle status D (ventilation required)
-0: vehicle status D charging is disabled
-1: vehicle status D charging is enabled (default)
-bit4: enable RCD feedback on MCLR pin (pin 4)
-0: disabled, no RCD connected (default)
-1: enabled
-bit5: auto clear RCD error
-0: disabled (default, power cycle needed)
-1: enabled (clear RCD error after <30s min timeout)
-bit6: AN pullup (rev16 and later)
-0: AN internal pull-up enabled (default)
-1: AN internal pull-up disabled
-bit7: PWM debug bit (rev17 and later)
-0: PWM debug disabled (default)
-1: PWM debug enable
-bit8: error LED routing to AN out (rev17 and later)
-0: disabled (default)
-1: enabled
-bit9: pilot auto recover delay (rev17 and later)
-0: disabled
-1: enabled (default)
-bit10-11: reserved
-bit12: enable startup delay
-bit13: disable EVSE after charge (write 8192)
-bit14: disable EVSE (write 16384)
-bit15: enable bootloader mode (write 32768)*/
+    bit0: Enable button for current change (no sense when 2003 = 0)
+        0: disabled
+        1: enabled (default)
+    bit1: Stop charging when button pressed
+        0: disabled (default)
+        1: enabled (charging will automatically start after you manually unplug and plug the cable to the vehicle)
+    bit2: Pilot ready state LED
+        0: blinks once (default)
+        1: is always ON
+    bit3: enable charging on vehicle status D (ventilation required)
+        0: vehicle status D charging is disabled
+        1: vehicle status D charging is enabled (default)
+    bit4: enable RCD feedback on MCLR pin (pin 4)
+        0: disabled, no RCD connected (default)
+        1: enabled
+    bit5: auto clear RCD error
+        0: disabled (default, power cycle needed)
+        1: enabled (clear RCD error after <30s min timeout)
+    bit6: AN pullup (rev16 and later)
+        0: AN internal pull-up enabled (default)
+        1: AN internal pull-up disabled
+    bit7: PWM debug bit (rev17 and later)
+        0: PWM debug disabled (default)
+        1: PWM debug enable
+    bit8: error LED routing to AN out (rev17 and later)
+        0: disabled (default)
+        1: enabled
+    bit9: pilot auto recover delay (rev17 and later)
+        0: disabled
+        1: enabled (default)
+    bit10-11: reserved
+    bit12: enable startup delay
+    bit13: disable EVSE after charge (write 8192)
+    bit14: disable EVSE (write 16384)
+    bit15: enable bootloader mode (write 32768)
+    */
+
+    if (mode == 13) {
+        config |= (1 << 13);
+    } else if (mode == 14) {
+        config |= (1 << 14);
+    }
+    // if mode == 0, neither 13 nor 14 is set (both cleared)
+
     writeRegister(REG_CONFIG, config);
     next_publish_at = millis() + 500;
 }
 
 bool startCharging() {
+    if (inPJR) {
+        queue_log_message("In PJR, refusing to start charging");
+        return false;
+    }
+
     if (millis() < adpsStopUntil) {
         return false;
     }
 
-    writeRegister(1004, 0);
-    writeConfigBit(13);
+    // writeRegister(1004, 0);
+    // "Disable after charge" and this will clear bit 14 "disable EVSE"
+    writeConfigBit(0);
+
+    // Start charging by setting the current to the max configured value
+    setChargeCurrent(100 * maxCurrent);
+    
     charging = true;
     Serial.println("Charging started");
     return true;
@@ -523,9 +635,13 @@ bool stopCharging() {
 bit1: run selftest and RCD test procedure (approx 30s)
 bit2: clear RCD error
 bit3 - bit15: not used*/
-    writeRegister(1004, 1);
+    // writeRegister(1004, 1);
 
-    writeConfigBit(14);
+    // writeConfigBit(14);
+    
+    // Stop charging by setting the current to 0
+    setChargeCurrent(0);
+
     charging = false;
     Serial.println("Charging stopped");
     return true;
@@ -544,7 +660,7 @@ void setupWebServer() {
     // Serve main page
     server.on("/", HTTP_GET, []() {
         String html = FPSTR(INDEX_HTML);
-            html.replace("%CURRENT%", String(evseRegs.currentConfig));
+        html.replace("%CURRENT%", String(evseRegs.currentConfig));
         html.replace("%CURRENT_CONFIG%", String(evseRegs.currentConfig / 100.));
         html.replace("%CURRENT_OUTPUT%", String(evseRegs.currentOutput / 100.));
         html.replace("%VEHICLE_STATE%", String(evseRegs.vehicleState));
@@ -567,6 +683,22 @@ void setupWebServer() {
         html.replace("%REG2008%", String(evseRegs.reg2008, HEX));
         html.replace("%BOOT_FW%", String(evseRegs.bootFirmware));
         html.replace("%HEURES_CREUSES%", inHeuresCreuses ? "ACTIVE" : "INACTIVE");
+        html.replace("%PJR_STATUS%", inPJR ? "<span style='color:red;font-weight:bold'>ACTIVE - BLOCKING ALL CHARGING</span>" : "INACTIVE");
+        
+        // Add current time
+        if (ntpSynced) {
+            time_t now = time(nullptr);
+            struct tm timeinfo;
+            localtime_r(&now, &timeinfo);
+            char timeStr[32];
+            snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d %02d-%02d-%04d",
+                    timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+                    timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+            html.replace("%CURRENT_TIME%", String(timeStr));
+        } else {
+            html.replace("%CURRENT_TIME%", "Not synced");
+        }
+        
         server.send(200, "text/html", html);
     });
 
@@ -603,7 +735,7 @@ void setupWebServer() {
         json += "\"reg2015\":" + String(evseRegs.reg2015) + ",";
         json += "\"reg2016\":" + String(evseRegs.reg2016) + ",";
         json += "\"reg2017\":" + String(evseRegs.reg2017) + ",";
-        json += "\"inHeuresCreuses\":" + String(inHeuresCreuses ? "true" : "false");
+        json += "\"inHeuresCreuses\":" + String(inHeuresCreuses ? "true" : "false") + ",";
         json += "}";
         server.send(200, "application/json", json);
     });
@@ -630,6 +762,43 @@ void setupWebServer() {
     });
 
     server.begin();
+}
+
+void setupNTP() {
+    // Configure NTP with timezone for Europe/Paris (CET/CEST)
+    // CET-1CEST,M3.5.0,M10.5.0/3 = Central European Time with DST
+    configTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
+    
+    Serial.println("Waiting for NTP time sync...");
+    time_t now = time(nullptr);
+    int retries = 0;
+    
+    // Wait for valid time sync from NTP server
+    // Check that we're at least in 2025 - if time() returns anything before that, NTP hasn't synced yet
+    // Unix timestamp for Jan 1, 2025 00:00:00 UTC = 1735689600 seconds since epoch
+    const time_t MIN_VALID_TIME = 1735689600;  // Jan 1, 2025 - NTP must give us a date >= this
+    
+    while (now < MIN_VALID_TIME && retries < 30) {
+        delay(500);
+        Serial.print(".");
+        now = time(nullptr);
+        retries++;
+    }
+    Serial.println();
+    
+    if (now >= MIN_VALID_TIME) {
+        ntpSynced = true;
+        struct tm timeinfo;
+        localtime_r(&now, &timeinfo);
+        Serial.printf("NTP synced! Current time: %02d:%02d:%02d %02d-%02d-%04d\n",
+                     timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+                     timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+        queue_log_message_fmt("NTP synced at %02d:%02d:%02d", 
+                            timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    } else {
+        Serial.println("Failed to sync NTP time");
+        queue_log_message("Failed to sync NTP time");
+    }
 }
 
 void setupOTA() {
@@ -690,21 +859,68 @@ void setup() {
     }
     Serial.println("\nWiFi connected");
 
+    setupNTP();
     setupOTA();
     setupMQTT();
     setupWebServer();
 
-    // Default safety values: boot current 8A, max cable 12A
+    // Default safety values: boot current 10A, max cable 12A
     writeRegister(2000, 10);
     writeRegister(2007, 12);
     maxCurrent = 10;
 
     // Minimal current for this car is 5A
     writeRegister(2002, 5);
+    writeConfigBit(0);
    
     stopCharging();
 
     queue_log_message("Svenvse started");
+}
+
+void checkScheduledCharging() {
+    static bool hasEnteredPreconditioning = false;
+
+    // Scheduled charging (for cabin pre-conditioning) is Monday and Tuesday, 8h00 to 8h20
+    if (!ntpSynced) {
+        return;  // Don't check if NTP hasn't synced yet
+    }
+    // Never charge during PJR (peak red)
+    if (inPJR) {
+        return;
+    }
+    
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    
+    // Check if today is Monday (1) or Tuesday (2)
+    // tm_wday: 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
+    bool isMonOrTue = (timeinfo.tm_wday == 1 || timeinfo.tm_wday == 2);
+    if (!isMonOrTue) {
+        return;
+    }
+    // Calculate current time in minutes since midnight
+    int currentMinutes = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+    int startMinutes = 8 * 60;
+    int endMinutes = startMinutes + 20;
+    
+    bool in_time_window = (currentMinutes >= startMinutes && currentMinutes < endMinutes);
+   
+    if (in_time_window && !charging) {
+        queue_log_message_fmt("Starting scheduled pre-conditioning at %02d:%02d on %s (6A)", 
+                            timeinfo.tm_hour, timeinfo.tm_min,
+                            timeinfo.tm_wday == 1 ? "Monday" : "Tuesday");
+        setChargeCurrent(100 * PRECONDITIONING_CURRENT);  // Set to 6A
+        startCharging();
+        hasEnteredPreconditioning = true;
+    } else if (!in_time_window && charging && hasEnteredPreconditioning) {
+        queue_log_message_fmt("Ending scheduled pre-conditioning at %02d:%02d on %s", 
+                            timeinfo.tm_hour, timeinfo.tm_min,
+                            timeinfo.tm_wday == 1 ? "Monday" : "Tuesday");
+        stopCharging();
+        setChargeCurrent(100 * maxCurrent);  // Restore max current
+    }
 }
 
 void publishStatus() {
@@ -761,17 +977,27 @@ void loop() {
     server.handleClient();
    
     static uint32_t last_read_regs = 0;
+    static uint32_t last_schedule_check = 0;
 
-    // Check if there's a pending log message to publish
-    if (logMessagePending) {
-        mqtt.publish("svevse/log", pendingLogMessage);
-        logMessagePending = false;
-        pendingLogMessage[0] = '\0'; // Clear the message
+    // Publish pending log messages from FIFO buffer
+    // Each logBufferRead() returns one complete message and advances the read pointer
+    // Safe even if mqtt.publish() triggers callbacks that queue more messages
+    const char *logMsg;
+    while ((logMsg = logBufferRead()) != NULL) {
+        if (*logMsg) {  // Skip empty messages
+            mqtt.publish("svevse/log", logMsg);
+        }
     }
 
     if (!last_read_regs || millis() - last_read_regs > 250) {
         readEvseRegisters();
         last_read_regs = millis();
+    }
+
+    // Check scheduled charging every 30 seconds
+    if (!last_schedule_check || millis() - last_schedule_check > 30000) {
+        checkScheduledCharging();
+        last_schedule_check = millis();
     }
 
     // State transition: an EV was just plugged in, start charge

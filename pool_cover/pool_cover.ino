@@ -109,8 +109,8 @@ static const unsigned long RADIO_CONFIG_CHECK_INTERVAL_IDLE = 3600000;  // 1 hou
 const long DEFAULT_TRAVEL_DISTANCE = 167; // Based on actual measurement, with 15 steps/turn = 10 turns
 volatile long encoder_position = 0;  // Current encoder position
 static long encoder_target_position = 0;  // Target position for current movement
-static long encoder_top_position = -DEFAULT_TRAVEL_DISTANCE;     // Marked top position
-static long encoder_bottom_position = DEFAULT_TRAVEL_DISTANCE; // Marked bottom position
+static long encoder_top_position = DEFAULT_TRAVEL_DISTANCE;      // Marked top position
+static long encoder_bottom_position = -DEFAULT_TRAVEL_DISTANCE; // Marked bottom position
 static bool has_marked_top = false;
 static bool has_marked_bottom = false;
 
@@ -149,15 +149,34 @@ const float INA226_VOLTAGE_CORRECTION = 1.0542f;
 const float SHUNT_RESISTANCE_OHMS = 0.010f;       // 10 milliohm shunt (R010)
 const float INA226_SHUNT_VOLTAGE_LSB = 0.0000025f; // 2.5µV per LSB for shunt voltage register
 
-// Encoder interrupt handler for KY040 library (shared by both interrupt types)
-void encoder_interrupt_handler() {
-    // Process pin state using KY040 library
+// CLK interrupt handler (external INT on pin 2)
+void encoder_clk_interrupt() {
+    int_clk_count++;
+    // Minimal handler - just call KY040 library directly
     switch (encoder.getRotation()) {
         case KY040::CLOCKWISE:
             encoder_position++;
+            encoder_cw_count++;
             break;
         case KY040::COUNTERCLOCKWISE:
             encoder_position--;
+            encoder_ccw_count++;
+            break;
+    }
+}
+
+// DT interrupt handler (PCINT on pin 4)
+void encoder_dt_interrupt() {
+    int_dt_count++;
+    // Minimal handler - just call KY040 library directly
+    switch (encoder.getRotation()) {
+        case KY040::CLOCKWISE:
+            encoder_position++;
+            encoder_cw_count++;
+            break;
+        case KY040::COUNTERCLOCKWISE:
+            encoder_position--;
+            encoder_ccw_count++;
             break;
     }
 }
@@ -293,10 +312,46 @@ void start_motor(char direction)
 	// Set target encoder position based on direction and limits
 	long current_pos = get_encoder_position();
 	
+	// Determine actual upper and lower limits from marked positions
+	long upper_limit, lower_limit;
+	bool has_upper_limit = false;
+	bool has_lower_limit = false;
+	
+	if (has_marked_top && has_marked_bottom) {
+		// Both marked - use actual values to determine which is upper/lower
+		if (encoder_top_position >= encoder_bottom_position) {
+			upper_limit = encoder_top_position;
+			lower_limit = encoder_bottom_position;
+		} else {
+			upper_limit = encoder_bottom_position;
+			lower_limit = encoder_top_position;
+		}
+		has_upper_limit = true;
+		has_lower_limit = true;
+	} else if (has_marked_top) {
+		// Only top marked - could be upper or lower depending on current position
+		if (encoder_top_position >= current_pos) {
+			upper_limit = encoder_top_position;
+			has_upper_limit = true;
+		} else {
+			lower_limit = encoder_top_position;
+			has_lower_limit = true;
+		}
+	} else if (has_marked_bottom) {
+		// Only bottom marked - could be upper or lower depending on current position
+		if (encoder_bottom_position <= current_pos) {
+			lower_limit = encoder_bottom_position;
+			has_lower_limit = true;
+		} else {
+			upper_limit = encoder_bottom_position;
+			has_upper_limit = true;
+		}
+	}
+	
 	if (direction == 'U') {
-		// Moving up - target is top position or current + default travel
-		if (has_marked_top) {
-			encoder_target_position = encoder_top_position;
+		// Moving up - target is upper limit or current + default travel
+		if (has_upper_limit) {
+			encoder_target_position = upper_limit;
 			if (current_pos >= encoder_target_position) {
 				// Already at the "top" position? Add 1
 				encoder_target_position = current_pos + 1;
@@ -305,11 +360,11 @@ void start_motor(char direction)
 			encoder_target_position = current_pos + DEFAULT_TRAVEL_DISTANCE;
 		}
 	} else { // direction == 'D'
-		// Moving down - target is bottom position or current + default travel
-		if (has_marked_bottom) {
-			encoder_target_position = encoder_bottom_position;
+		// Moving down - target is lower limit or current - default travel
+		if (has_lower_limit) {
+			encoder_target_position = lower_limit;
 			if (current_pos <= encoder_target_position) {
-				// Already at the "bottom" position? Remove 1
+				// Already at or past the lower limit - only allow 1 step
 				encoder_target_position = current_pos - 1;
 			}
 		} else {
@@ -761,10 +816,9 @@ void setup(){
 	pinMode(ENCODER_DT_PIN, INPUT_PULLUP);
 	
 	// Set up interrupts for encoder using KY040 library
-	// Use faster external interrupt for CLK pin (pin 2 supports INT0)
-	attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), encoder_interrupt_handler, CHANGE);
-	// Use pin change interrupt for DT pin (pin 4 doesn't support external interrupts)
-	attachPCINT(digitalPinToPCINT(ENCODER_DT_PIN), encoder_interrupt_handler, CHANGE);
+	// Pin 2 supports external interrupt (INT0), pin 4 only supports PCINT
+	attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), encoder_clk_interrupt, CHANGE);  // External INT on pin 2 (CLK)
+	attachPCINT(digitalPinToPCINT(ENCODER_DT_PIN), encoder_dt_interrupt, CHANGE);           // PCINT on pin 4 (DT)
 
 	// RF24 IRQ pin
 	pinMode(RF24_IRQ_PIN, INPUT_PULLUP); 
@@ -817,6 +871,16 @@ void setup(){
 
 	radio_send(PIPE_POOL_COVER, 'Q', 'b', 0, 0); //"booting"
 	stop_motor();
+	
+	// Print initial encoder pin states for debug
+	Serial.print(F("Encoder pins: CLK(D"));
+	Serial.print(ENCODER_CLK_PIN);
+	Serial.print(F(")="));
+	Serial.print(digitalRead(ENCODER_CLK_PIN));
+	Serial.print(F(" DT(D"));
+	Serial.print(ENCODER_DT_PIN);
+	Serial.print(F(")="));
+	Serial.println(digitalRead(ENCODER_DT_PIN));
 }
 
 void loop() 

@@ -41,7 +41,7 @@ struct thermometer {
     uint32_t last_seen;
     bool is_Z2M;
 } thermometers[] = {
-    { makeTherm("exterior_thermometer", 0) },
+    { makeTherm("exterior_thermometer", 1) },
     { makeTherm("living_thermometer", 1) },
 //    { makeTherm("bedroom_thermometer") },
     { makeTherm(THERM_BED1, 1) },

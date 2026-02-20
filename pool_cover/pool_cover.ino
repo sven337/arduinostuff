@@ -785,11 +785,6 @@ bool configure_ina226() {
 	Serial.print(F("INA226 calibrated. Current LSB: "));
 	Serial.print(ina226.getCurrentLSB_mA());
 	Serial.println(F(" mA"));
-	Serial.print(F("Current measurement range up to "));
-	Serial.print(max_current);
-	Serial.print(F("A with "));
-	Serial.print(SHUNT_RESISTANCE_OHMS);
-	Serial.println(F("Ω shunt"));
 	
 	// Set conversion time for both shunt and bus voltage (default is fine)
 	// Enable continuous shunt and bus voltage monitoring
@@ -881,7 +876,6 @@ void setup(){
 	
 	// Configure INA226 if it was successfully initialized
 	if (ina226_initialized) {
-		Serial.println(F("Configuring INA226..."));
 		
 		if (!configure_ina226()) {
 			Serial.println(F("ERROR: INA226 configuration failed"));

@@ -114,6 +114,28 @@ static long encoder_bottom_position = -DEFAULT_TRAVEL_DISTANCE; // Marked bottom
 static bool has_marked_top = false;
 static bool has_marked_bottom = false;
 
+// Serial debug mode: enabled when running off UART power (voltage < 5V)
+static bool serial_debug_mode = false;
+static long last_debug_encoder_position = 0;  // For detecting encoder changes in debug mode
+static unsigned long next_debug_status_at = 0;  // Periodic debug status
+
+// Debug: track raw encoder pin states
+volatile byte last_encoder_state = 0xFF;
+volatile unsigned long encoder_cw_count = 0;
+volatile unsigned long encoder_ccw_count = 0;
+volatile unsigned long encoder_active_count = 0;
+volatile unsigned long encoder_idle_count = 0;
+volatile unsigned long encoder_state_hist[4] = {0, 0, 0, 0};  // Count of each state seen
+
+// Debug: track sequence failures - record last N state transitions
+#define STATE_LOG_SIZE 32
+volatile byte state_log[STATE_LOG_SIZE];
+volatile byte state_log_idx = 0;
+
+// Debug: track which interrupt source fires
+volatile unsigned long int_clk_count = 0;  // External INT on pin 2 (CLK)
+volatile unsigned long int_dt_count = 0;   // PCINT on pin 4 (DT)
+
 
 int init_failed = 0;
 bool ina226_initialized = false;
@@ -890,6 +912,56 @@ void loop()
 		check_radio_messages();
 	}
 
+	// Serial debug mode: report encoder position changes and periodic status
+	if (serial_debug_mode) {
+		long current_pos = get_encoder_position();
+		if (current_pos != last_debug_encoder_position) {
+			Serial.print(F("Enc: "));
+			Serial.print(current_pos);
+			Serial.print(F(" st=0b"));
+			Serial.print(last_encoder_state, BIN);
+			Serial.print(F(" CW="));
+			Serial.print(encoder_cw_count);
+			Serial.print(F(" CCW="));
+			Serial.print(encoder_ccw_count);
+			Serial.print(F(" ACT="));
+			Serial.print(encoder_active_count);
+			Serial.print(F(" IDL="));
+			Serial.println(encoder_idle_count);
+			last_debug_encoder_position = current_pos;
+		}
+		
+		// Periodic raw pin state report every 2 seconds
+		if (millis() >= next_debug_status_at) {
+			next_debug_status_at = millis() + 2000;
+			byte clk = digitalRead(ENCODER_CLK_PIN);
+			byte dt = digitalRead(ENCODER_DT_PIN);
+			Serial.print(F("RAW: CLK="));
+			Serial.print(clk);
+			Serial.print(F(" DT="));
+			Serial.print(dt);
+			Serial.print(F(" INT:clk="));
+			Serial.print(int_clk_count);
+			Serial.print(F(" dt="));
+			Serial.print(int_dt_count);
+			Serial.print(F(" CW="));
+			Serial.print(encoder_cw_count);
+			Serial.print(F(" CCW="));
+			Serial.print(encoder_ccw_count);
+			// State histogram: how many times each state was seen
+			// State 0=0b00, 1=0b01, 2=0b10, 3=0b11
+			Serial.print(F(" ST[00="));
+			Serial.print(encoder_state_hist[0]);
+			Serial.print(F(" 01="));
+			Serial.print(encoder_state_hist[1]);
+			Serial.print(F(" 10="));
+			Serial.print(encoder_state_hist[2]);
+			Serial.print(F(" 11="));
+			Serial.print(encoder_state_hist[3]);
+			Serial.println(F("]"));
+		}
+	}
+
 	// Drive motor
 	if (motor_running) {
 		bool must_stop = false;
@@ -992,6 +1064,9 @@ void loop()
 			float bus_voltage_v = ina226.getBusVoltage() / INA226_VOLTAGE_CORRECTION;
 			uint16_t voltage_mv = (uint16_t)(bus_voltage_v * 1000.0);
 			send_battery_voltage(voltage_mv);
+			
+			// Enable serial debug mode if running off UART power (voltage < 5V)
+			serial_debug_mode = (bus_voltage_v < 5.0);
 			
 			// Read signed current (mA) - positive = discharging, negative = charging
 			float current_a = ina226.getCurrent();

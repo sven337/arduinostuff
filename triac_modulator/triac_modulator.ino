@@ -343,9 +343,9 @@ void check_temperature_shutdown_conditions() {
     do_disable = true;
   }
 
-  if (room_temp_valid && room_temperature >= 21) {
+  if (room_temp_valid && room_temperature >= 22) {
     // Room temperature reached 21°C -> disable heating if exterior temperature
-    // is below 17°C or if exterior temperature is not available
+    // is above 17°C or if exterior temperature is not available
     if (!ext_temp_valid || ext_temperature > 17) {
       do_disable = true;
     }
@@ -371,7 +371,7 @@ void setupMQTT()
   mqtt.subscribe("zigbee2mqtt/main_panel_powermonitor/power_ab", netpower_cb);
   mqtt.subscribe("zigbee2mqtt/smartplug_lidl/power", myconsumption_cb);
   mqtt.subscribe("zigbee2mqtt/bedroom_thermometer/temperature", roomtemperature_cb);
-  mqtt.subscribe("exterior_thermometer/temperature", exttemperature_cb);
+  mqtt.subscribe("zigbee2mqtt/exterior_thermometer/temperature", exttemperature_cb);
 
   mqtt.begin();
 }

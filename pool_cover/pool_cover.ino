@@ -39,7 +39,7 @@
  *   A3 - Available
  *   A4 - I2C SDA (INA226)
  *   A5 - I2C SCL (INA226)
- *   A6 - Motor Current Sense (analog only)
+ *   A6 - Available
  *   A7 - Available
  */
 
@@ -56,7 +56,6 @@ const int DS18B20_PIN = 7;     // DS18B20 temperature sensor
 const int MOTOR_PWM_A_PIN = 5;    // PWM pin for motor A (H-bridge left side)
 const int MOTOR_PWM_B_PIN = 6;    // PWM pin for motor B (H-bridge right side) 
 const int MOTOR_ENABLE_PIN = A0;  // Enable pin for both BTN7960B (connected together)
-const int MOTOR_CURRENT_PIN = A6; // Motor current sense (analog only)
 
 // KY-040 Encoder pins
 const int ENCODER_CLK_PIN = 2;  // Interrupt pin (CLK)

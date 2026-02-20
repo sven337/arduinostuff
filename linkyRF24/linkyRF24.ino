@@ -22,6 +22,7 @@ const int LINKY_RX = 2;
 
 const uint64_t pipe_address = 0xF0F0F0F0F3LL;
 RF24 rf24(CE_PIN, CSN_PIN);
+OneWire ds(DS18B20_PIN);
 
 // Pin change interrupts are not compatible with SoftwareSerial :(
 struct {
@@ -41,6 +42,45 @@ int teleinfo_cur = 0;
 int8_t frame_bigskip_counter; // how many more frames to skip (for unimportant fields)
 int8_t frame_smallskip_counter; // how many more frames to skip (for important fields)
 uint32_t next_report_battery_at;
+static unsigned long send_next_temperature_at = 0; // Time for next temperature send
+
+// Thermometer address to identification letter mapping
+const struct {
+    uint8_t addr[8];
+    uint8_t letter;
+} thermometer_letter_from_addr[] = {
+    {{ 0x28, 0xFF, 0xBD, 0xD3, 0x90, 0x15, 0x03, 0xBB }, 'L'}, // Linky thermometer
+};
+
+const uint8_t num_known_thermometers = sizeof(thermometer_letter_from_addr) / sizeof(thermometer_letter_from_addr[0]);
+
+// Function to get identification letter for a given address
+uint8_t get_thermometer_letter(uint8_t addr[8]) {
+    for (uint8_t i = 0; i < num_known_thermometers; i++) {
+        bool match = true;
+        for (uint8_t j = 0; j < 8; j++) {
+            if (thermometer_letter_from_addr[i].addr[j] != addr[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return thermometer_letter_from_addr[i].letter;
+        }
+    }
+    return 0; // Unknown address
+}
+
+// Function to print address in copy-pasteable format
+void print_unknown_address(uint8_t addr[8]) {
+    Serial.print(F("Unknown thermometer address: {{ 0x"));
+    for (uint8_t i = 0; i < 8; i++) {
+        if (addr[i] < 0x10) Serial.print(F("0"));
+        Serial.print(addr[i], HEX);
+        if (i < 7) Serial.print(F(", 0x"));
+    }
+    Serial.println(F(" }, 'X'}, //unknown"));
+}
 
 #define BIGSKIP_INTERVAL 30 // count 30 full frames (approx 90sec)
 #define SMALLSKIP_INTERVAL 3  // approx 9 seconds
@@ -82,9 +122,50 @@ HHPHC A ,
 MOTDETAT 000000 B
 
 */
-// XXX add checksum verification
+
+// Verify ERDF Linky checksum
+// Format: LABEL DATA CHECKSUM
+// Checksum is calculated over: LABEL + SP + DATA (including the space between label and data)
+// Algorithm: sum all ASCII codes, keep 6 LSBs (& 0x3F), add 0x20
+bool verify_checksum(const char *line) {
+    int len = strlen(line);
+    
+    // Remove trailing \n or \r if present
+    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+        len--;
+    }
+    if (len < 3) return false; // Too short to be valid
+    
+    // The checksum has to be the last character
+    int checksum_pos = len - 1;
+    // ... and have a space before it
+    if (line[checksum_pos - 1] != ' ')
+        return false;
+
+    // Extract checksum from buffer
+    char received_checksum = line[checksum_pos];
+    
+    // Calculate expected checksum from start to space before checksum (exclusive)
+    // This includes: LABEL + SP + DATA
+    uint8_t sum = 0;
+    for (int i = 0; i < checksum_pos - 1; i++) {
+        sum += line[i];
+    }
+    
+    // Apply checksum algorithm: keep 6 LSBs and add 0x20
+    char calculated_checksum = (sum & 0x3F) + 0x20;
+    
+    return (calculated_checksum == received_checksum);
+}
+
 void send_line()
 {
+    if (!verify_checksum(teleinfo_buf)) {
+        Serial.print("linky checksum error: ");
+        Serial.println(teleinfo_buf);
+        return;
+    }
+    
     // We have four bytes on the air to fit the data. Build packets intelligently.
     const struct {
         const char     *name; // name of frame
@@ -99,8 +180,11 @@ void send_line()
             { "BBRHPJB", 'B', 0, 0}, //006345478 O
             { "BBRHCJW", 'w', 0, 0}, //000000000 2
             { "BBRHPJW", 'W', 0, 0}, //000000000 ?
-            { "BBRHCJR", 'r', 0, 0},  //000000000 -
+            { "BBRHCJR", 'r', 0, 0}, //000000000 -
             { "BBRHPJR", 'R', 0, 0}, //000000000 :
+            { "HCHP",    'H', 0, 0}, //000000000 
+            { "HCHC",    'C', 0, 0}, //000000000 
+            { "BASE",    'S', 0, 0}, //000000000 
             { "PTEC",    'J', 1, 0}, //HPJB P
 //          { "DEMAIN",   0, 0, 0}, //---- "
             { "IINST",   'I', 0, 1}, //003 Z
@@ -135,9 +219,9 @@ void send_line()
         int pos = strlen(mapping[i].name) + 1;
         pos += mapping[i].pos_offset; // ignore the first N characters of the frame (1)
 
-        if (MATCH("BBRH")) {
-            uint32_t val = strtol(teleinfo_buf + pos, NULL, 10);
+        if (MATCH("BBRH") || MATCH("HCHP") || MATCH("HCHC") || MATCH("BASE")) {
             // Cannot fit the whole index in 24 bits, so trim the 6 LSBs
+            uint32_t val = strtol(teleinfo_buf + pos, NULL, 10);
             val = val >> 6;
             data[1] = (val >> 16) & 0xFF;
             data[2] = (val >>  8) & 0xFF;
@@ -195,8 +279,6 @@ void consume_teleinfo()
     }
 }
 
-static int init_failed = 0;
-
 ISR(WDT_vect)
 {
 	Sleepy::watchdogEvent();
@@ -205,7 +287,7 @@ ISR(WDT_vect)
 int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
 	uint8_t payload[4] = { p0, p1, p2, p3 };
-//	digitalWrite(LED_YELLOW, 1);
+	digitalWrite(LED_YELLOW, 1);
     rf24.powerUp();
 	bool ok = rf24.write(payload, 4);
 	if (ok) 
@@ -214,21 +296,21 @@ int radio_send(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 		Serial.println("send KO");
 	
     printf("sending %c %c %c %c\n", p0, p1, p2, p3);
-//	digitalWrite(LED_YELLOW, 0);
+	digitalWrite(LED_YELLOW, 0);
     
     rf24.powerDown();
 
 	if (!ok) {
-//		digitalWrite(LED_RED, 1);
+		digitalWrite(LED_RED, 1);
 		return -1;
 	}
-//	digitalWrite(LED_RED, 0);
+	digitalWrite(LED_RED, 0);
 	return 0;
 }
 
 void setup(){
 	printf_begin();
-	Serial.begin(57600);
+	Serial.begin(115200);
     edfSerial.begin(1200); 
 
 	// Radio init
@@ -249,8 +331,21 @@ void setup(){
 	if ((rf24.getDataRate() != RF24_250KBPS) ||
 		(rf24.getCRCLength() != RF24_CRC_16)) {
 		// failed to initialize radio
-		init_failed = 1;
-	}
+        while (1) {
+            int red = 0;
+            digitalWrite(LED_RED, red);
+            red = !red;
+            // Christmas tree if init failed
+            digitalWrite(LED_YELLOW, 1);
+            delay(50);
+            digitalWrite(LED_YELLOW, 0);
+            delay(50);
+            digitalWrite(LED_YELLOW, 1);
+            delay(50);
+            digitalWrite(LED_YELLOW, 0);
+            delay(50);
+        }
+    }
 
 
 	pinMode(LED_YELLOW, OUTPUT);
@@ -269,29 +364,16 @@ void setup(){
 	digitalWrite(LED_RED, 0);
 	digitalWrite(LED_YELLOW, 0);
 
+    radio_send('D', 0, 0, 0);
 	rf24.powerDown();
 
     pinMode(WATER_PULSE_PIN, INPUT_PULLUP);
     pinMode(GAS_PULSE_PIN, INPUT_PULLUP);
+    
 }
 
 void loop() 
 {
-	int red = 0;
-	while (init_failed) {
-			digitalWrite(LED_RED, red);
-			red = !red;
-			// Christmas tree if init failed
-			digitalWrite(LED_YELLOW, 1);
-			delay(50);
-			digitalWrite(LED_YELLOW, 0);
-			delay(50);
-			digitalWrite(LED_YELLOW, 1);
-			delay(50);
-			digitalWrite(LED_YELLOW, 0);
-			delay(50);
-	}
-    
     if (edfSerial.available()) {
         consume_teleinfo();
     }
@@ -314,6 +396,71 @@ void loop()
         }
     }
 
+    // Send temperature
+    if (millis() >= send_next_temperature_at) {
+        send_next_temperature_at = millis() + 15 * 60 * 1000LL; // 15 minutes
+
+        // Send temperature data from all thermometers
+        uint8_t addr[8];
+        uint8_t thermometer_count = 0;
+        
+        // Search for all DS18B20 devices
+        ds.reset_search();
+        while (ds.search(addr)) {
+            thermometer_count++;
+            
+            // Get identification letter for this address
+            uint8_t identification_letter = get_thermometer_letter(addr);
+            if (identification_letter == 0) {
+                // Unknown thermometer - print address for copy-paste
+                print_unknown_address(addr);
+                continue; // Skip unknown thermometers
+            }
+
+            // Read temperature from this thermometer
+            ds.reset();
+            ds.select(addr);
+            ds.write(0x44, 1); // Start temperature conversion
+            delay(1000); // Wait for conversion
+            
+            uint8_t present = ds.reset();
+            ds.select(addr);    
+            ds.write(0xBE); // Read scratchpad
+
+            uint8_t data[9];
+            for (int i = 0; i < 9; i++) {
+                data[i] = ds.read();
+            }
+
+            // Check CRC
+            if (data[8] != OneWire::crc8(data, 8)) {
+                Serial.print(F("ERROR: CRC mismatch for thermometer "));
+                Serial.println((char)identification_letter);
+                // Indicate that we read garbage
+                radio_send('T', identification_letter, 0xFF, 0xFF);
+                continue;
+            }
+            
+            // Convert temperature
+            int16_t raw = (data[1] << 8) | data[0];
+            byte cfg = (data[4] & 0x60);
+            // at lower res, the low bits are undefined, so let's zero them
+            if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+            else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+            else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+            //// default is 12 bit resolution, 750 ms conversion time
+            
+            float temperature_c = (float)raw / 16.0;
+            printf("Temperature %c is %d\n", identification_letter, (int)(100.0 * temperature_c));
+
+            // Send temperature
+            radio_send('T', identification_letter, (raw >> 8) & 0xFF, raw & 0xFF);
+        }
+        
+        if (thermometer_count == 0) {
+            Serial.println("No DS18B20 thermometers found");
+        }
+    }
 
     /*set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();

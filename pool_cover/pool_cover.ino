@@ -34,8 +34,8 @@
  * 
  * Analog Pins:
  *   A0 - Motor Enable (both BTN7960B enables connected together)
- *   A1 - Available
- *   A2 - Available
+ *   A1 - MCU battery voltage sense (via divider)
+ *   A2 - MCU battery divider enable (LOW=enabled, Hi-Z=disabled)
  *   A3 - Available
  *   A4 - I2C SDA (INA226)
  *   A5 - I2C SCL (INA226)
@@ -56,6 +56,8 @@ const int DS18B20_PIN = 7;     // DS18B20 temperature sensor
 const int MOTOR_PWM_A_PIN = 5;    // PWM pin for motor A (H-bridge left side)
 const int MOTOR_PWM_B_PIN = 6;    // PWM pin for motor B (H-bridge right side) 
 const int MOTOR_ENABLE_PIN = A0;  // Enable pin for both BTN7960B (connected together)
+const int MCU_BATTERY_SENSE_PIN = A1;
+const int MCU_BATTERY_DIVIDER_ENABLE_PIN = A2;
 
 // KY-040 Encoder pins
 const int ENCODER_CLK_PIN = 2;  // Interrupt pin (CLK)
@@ -418,22 +420,27 @@ int radio_send(uint8_t pipe_id, uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	
 	delayMicroseconds(5000);
 	bool ok = radio.write(payload, 4);
-	Serial.print(F("radio_send p"));
-	Serial.print(pipe_id);
-	Serial.print(F("["));
-	Serial.print((char)p0);
-	Serial.print(F(" 0x"));
-	if (p1 < 16) Serial.print(F("0"));
-	Serial.print(p1, HEX);
-	Serial.print(F(" 0x"));
-	if (p2 < 16) Serial.print(F("0"));
-	Serial.print(p2, HEX);
-	Serial.print(F(" 0x"));
-	if (p3 < 16) Serial.print(F("0"));
-	Serial.print(p3, HEX);
-	Serial.print(F("] -> "));
-	Serial.println(ok ? F("OK") : F("KO"));
-	
+	if (serial_debug_mode) {
+		Serial.print(F("radio_send p"));
+		Serial.print(pipe_id);
+		Serial.print(F("["));
+		Serial.print((char)p0);
+		Serial.print(F(" 0x"));
+		if (p1 < 16)
+			Serial.print(F("0"));
+		Serial.print(p1, HEX);
+		Serial.print(F(" 0x"));
+		if (p2 < 16)
+			Serial.print(F("0"));
+		Serial.print(p2, HEX);
+		Serial.print(F(" 0x"));
+		if (p3 < 16)
+			Serial.print(F("0"));
+		Serial.print(p3, HEX);
+		Serial.print(F("] -> "));
+		Serial.println(ok ? F("OK") : F("KO"));
+	}
+
 	// Resume listening after sending
 	radio.startListening();
 
@@ -446,22 +453,32 @@ int radio_send(uint8_t pipe_id, uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 	return 0;
 }
 
-// Convert analog reading to millivolts
-uint16_t analog_to_millivolts(uint16_t analog_reading)
+uint16_t read_mcu_battery_voltage_mv()
 {
-	// Arduino ADC: 0-1023 for 0-5V (or 0-3.3V depending on reference)
-	// Assuming 3.3V reference: mV = analog_reading * 3300 / 1024
-	return (uint32_t)analog_reading * 3300 / 1024;
+	// Enable resistor divider (pull pin to GND)
+	pinMode(MCU_BATTERY_DIVIDER_ENABLE_PIN, OUTPUT);
+	digitalWrite(MCU_BATTERY_DIVIDER_ENABLE_PIN, LOW);
+
+	delay(2); // Let divider node settle before ADC conversion.
+	uint16_t raw = analogRead(MCU_BATTERY_SENSE_PIN);
+
+	// Disable resistor divider (pin in HIGH-Z)
+	pinMode(MCU_BATTERY_DIVIDER_ENABLE_PIN, INPUT);
+	// Arduino ADC: 0-1023 maps to 0-Vref. Controller is powered from 3.3V LDO.
+	uint32_t millivolts = (uint32_t)raw * 3300UL / 1023UL;
+	// Vsource = Vtap * (Rtop + Rbottom) / Rbottom, with Rtop=2.2k and Rbottom=6.8k.
+	millivolts = (millivolts * (2200UL + 6800UL)) / 6800UL;
+	return (uint16_t)millivolts;
 }
 
-void send_battery_voltage(uint16_t voltage_mv)
+void send_main_battery_voltage(uint16_t voltage_mv)
 {
 	radio_send(PIPE_POOL_COVER, 'V', voltage_mv & 0xFF, (voltage_mv >> 8) & 0xFF, 0);
 }
 
-void send_solar_voltage(uint16_t voltage_mv)
+void send_mcu_battery_voltage(uint16_t voltage_mv)
 {
-	radio_send(PIPE_POOL_COVER, 'S', voltage_mv & 0xFF, (voltage_mv >> 8) & 0xFF, 0);
+	radio_send(PIPE_POOL_COVER, 'v', voltage_mv & 0xFF, (voltage_mv >> 8) & 0xFF, 0);
 }
 
 // Sends battery power as signed 24-bit milliwatts (two's complement), little-endian in 3 data bytes.
@@ -822,7 +839,10 @@ void setup(){
 	pinMode(MOTOR_PWM_A_PIN, OUTPUT);
 	pinMode(MOTOR_PWM_B_PIN, OUTPUT);
 	pinMode(MOTOR_ENABLE_PIN, OUTPUT);
-	// Note: A6 is analog-only, no pinMode needed for current sense
+
+	// MCU battery sensing
+	pinMode(MCU_BATTERY_SENSE_PIN, INPUT);
+	pinMode(MCU_BATTERY_DIVIDER_ENABLE_PIN, INPUT);
 
 	// INA226 alert pin
 	pinMode(INA226_ALERT_PIN, INPUT_PULLUP);
@@ -1044,6 +1064,7 @@ void loop()
 			send_next_status_at = millis() + 60 * 60 * 1000LL; // 1 hour
 		}
 		send_cover_status();
+		send_mcu_battery_voltage(read_mcu_battery_voltage_mv());
 		
 		// Read and send INA226 measurements
 		if (ina226_initialized) {
@@ -1058,7 +1079,7 @@ void loop()
 			// Read bus voltage (mV) and apply correction for counterfeit chip
 			float bus_voltage_v = ina226.getBusVoltage() / INA226_VOLTAGE_CORRECTION;
 			uint16_t voltage_mv = (uint16_t)(bus_voltage_v * 1000.0);
-			send_battery_voltage(voltage_mv);
+			send_main_battery_voltage(voltage_mv);
 			
 			// Enable serial debug mode if running off UART power (voltage < 5V)
 			serial_debug_mode = (bus_voltage_v < 5.0);

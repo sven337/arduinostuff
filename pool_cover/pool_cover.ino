@@ -10,10 +10,10 @@
 #include "KY040.h"
 
 // Comment out this define to build without RF24 radio support.
-// #define HAS_RF24
-#define HAS_BUTTON_CMD
-#define HAS_SERIAL_CONSOLE
-#define DEBUG_ENCODER
+#define HAS_RF24
+//#define HAS_BUTTON_CMD
+//#define HAS_SERIAL_CONSOLE
+//#define DEBUG_ENCODER
 
 #if defined(HAS_RF24) && defined(HAS_BUTTON_CMD)
 #error "HAS_RF24 and HAS_BUTTON_CMD are mutually exclusive because they share pins."
@@ -96,6 +96,7 @@ KY040 encoder(ENCODER_CLK_PIN, ENCODER_DT_PIN);
 static unsigned long overcurrent_start_time = 0;
 static bool overcurrent_detected = false;
 static const float OVERCURRENT_THRESHOLD = 6.0; // 6 Amperes
+static const float OVERCURRENT_HARD_THRESHOLD = 8.0; // 8 Amperes
 static const unsigned long OVERCURRENT_TIMEOUT = 15000; // 15 seconds
 
 // INA226 alert handling
@@ -109,8 +110,8 @@ const uint64_t pipe_address_temperature = 0xF0F0F0F0F4LL;
 #define PIPE_POOL_COVER 1
 #define PIPE_TEMPERATURE 4
 
-static unsigned long motor_duration_up = (10 * 60 + 30) * 1000UL; // 10 minutes 30 seconds for up
-static unsigned long motor_duration_down = 8 * 60 * 1000UL; // max 8 minutes for down
+static unsigned long motor_duration_up = (9 * 60) * 1000UL; // 9 minutes for up
+static unsigned long motor_duration_down = (6 * 60 + 30) * 1000UL; // max 6 minutes 30 seconds for down
 static unsigned long motor_stop_at = 0;
 static bool motor_running = false;
 static char motor_direction = 'U';
@@ -1451,31 +1452,31 @@ void loop()
 		bool must_stop = false;
 		
 		// Check for INA226 alert (overcurrent)
-		if (0 && ina226_initialized && ina226_alert_triggered) {
-			ina226_alert_triggered = false; // Clear flag
-			
-			// Read current to confirm and get exact value
-			float current_a = ina226.getCurrent();
-			
-			if (current_a >= OVERCURRENT_THRESHOLD) {
-				if (!overcurrent_detected) {
-					// Start overcurrent timer
-					overcurrent_detected = true;
-					overcurrent_start_time = millis();
-					Serial.print(F("Overcurrent alert triggered: "));
-					Serial.print(current_a);
-					Serial.println(F("A - starting timer"));
-				}
-			}
-			
-			// Clear the alert flag in INA226 by reading the alert register
-			ina226.getAlertFlag();
+    if (ina226_initialized && ina226_alert_triggered) {
+      ina226_alert_triggered = false; // Clear flag
 
-			send_next_status_at = millis(); // Send update immediately
-		}
+      // Read current to confirm and get exact value
+      float current_a = ina226.getCurrent();
+
+      if (current_a >= OVERCURRENT_THRESHOLD) {
+        if (!overcurrent_detected) {
+          // Start overcurrent timer
+          overcurrent_detected = true;
+          overcurrent_start_time = millis();
+          Serial.print(F("Overcurrent alert triggered: "));
+          Serial.print(current_a);
+          Serial.println(F("A - starting timer"));
+        }
+
+        // Clear the alert flag in INA226 by reading the alert register
+        ina226.getAlertFlag();
+
+        send_next_status_at = millis(); // Send update immediately
+      }
+    }
 		
 		// Check overcurrent timer if overcurrent was detected
-		if (0 && overcurrent_detected) {
+		if (overcurrent_detected) {
 			float current_a = ina226.getCurrent();
 			
 			if (current_a >= OVERCURRENT_THRESHOLD) {
@@ -1496,6 +1497,14 @@ void loop()
 				overcurrent_detected = false;
 			}
 		}
+			
+    float current_a = ina226.getCurrent();
+    if (current_a >= OVERCURRENT_HARD_THRESHOLD) {
+      Serial.print(F("Overcurrent hard threshold reached: "));
+      Serial.print(current_a);
+      Serial.println(F("A - stopping motor"));
+      must_stop = true;
+    }
 		
 		// Check if time limit reached
 		if (millis() >= motor_stop_at) {
@@ -1530,7 +1539,7 @@ void loop()
 		if (motor_running) {
 			send_next_status_at = millis() + 5000LL;
 		} else {
-			send_next_status_at = millis() + 60 * 60 * 1000LL; // 1 hour
+			send_next_status_at = millis() + 30 * 60 * 1000LL; // 30 minutes
 		}
 		send_cover_status();
 		read_battery_information(true, true);
@@ -1627,8 +1636,8 @@ void loop()
 	return;
 #endif
 #else
-	const unsigned long RX_SLEEP_MS = 192;
-	const unsigned long RX_LISTEN_MS = 48; // 16ms aligned, ~25% duty at 192ms cycle
+	const unsigned long RX_SLEEP_MS = 96;
+	const unsigned long RX_LISTEN_MS = 48; // 16ms aligned
 	const unsigned long RX_CYCLE_MS = RX_SLEEP_MS + RX_LISTEN_MS;
 	const unsigned long MEASURED_CYCLE_TIME = RX_CYCLE_MS + 6UL;
 
@@ -1641,7 +1650,7 @@ void loop()
 		// Sleep with a duty-cycled RX on RF24: 160ms radio off, 32ms radio RX on
 		// measured consumption is about 23mA with RX on
 
-		// Keep the radio listening for 32ms
+		// Keep the radio listening for some duration
 		Sleepy::loseSomeTime(RX_LISTEN_MS);
 		if (radio_packet_received) {
 			return;

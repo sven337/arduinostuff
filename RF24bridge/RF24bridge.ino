@@ -1,9 +1,15 @@
 #include <SPI.h>
 #include <SoftwareSerial.h>
 #include <OneWire.h>
+#include <avr/wdt.h>
 #include "printf.h"
 #include "nRF24L01.h"
 #include "RF24.h"
+
+// Capture MCUSR before the bootloader or WDT init clears it
+uint8_t reset_flags __attribute__((section(".noinit")));
+void save_reset_flags(void) __attribute__((naked, used, section(".init3")));
+void save_reset_flags(void) { reset_flags = MCUSR; MCUSR = 0; }
 
 const int CE_PIN = 9;
 const int CSN_PIN = 8;
@@ -99,7 +105,11 @@ void setup()
         Serial.begin(57600);
     #endif
 
-    printf("RF24bridge starting\n");
+    printf("RF24bridge starting, reset: %s%s%s%s\n",
+        (reset_flags & (1 << WDRF))  ? "WDT "  : "",
+        (reset_flags & (1 << BORF))  ? "BOD "  : "",
+        (reset_flags & (1 << EXTRF)) ? "EXT "  : "",
+        (reset_flags & (1 << PORF))  ? "PWR"   : "");
 #if HAS_RF24
 start:
 	rf24.begin();

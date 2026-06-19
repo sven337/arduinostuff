@@ -6,7 +6,7 @@
 #include "wifi_params.h"
 #include "mqtt_login.h"
 #include <ArduinoOTA.h>
-#include <time.h>  // For NTP time synchronization
+#include <time.h>
 
 #define REG_CURRENT_CONFIG 1000  // Configured current
 #define REG_CONFIG        2005  // Configuration register
@@ -31,10 +31,7 @@ bool throttlingCurrent;
 uint32_t throttling_current_until = 0;
 bool inHeuresCreuses = false;  // Track if we're in off-peak hours
 bool inPJR = false;  // Track if we're in PJR (peak red)
-
-// NTP and scheduled charging variables
 bool ntpSynced = false;
-const float PRECONDITIONING_CURRENT = 6.0;  // 6A for cabin pre-conditioning
 
 // FIFO circular buffer for log messages
 // Each message is null-terminated in the buffer
@@ -462,8 +459,15 @@ void setupMQTT() {
     
     mqtt.subscribe(MQTT_TOPIC_ADPS, [](const char* payload) {
         if (strcmp(payload, "1") == 0) {
-            queue_log_message("ADPS, stopping charge");
-            adpsStopUntil = millis() + 1200000; // 20 minutes
+            // NOTE: upstream may publish multiple "1" messages while ADPS is active.
+            // Make logs unique so HA state changes show repeats, and show when we expect to retry.
+            static uint32_t adpsEventCount = 0;
+            adpsEventCount++;
+
+            uint32_t newStopUntil = millis() + 1200000; // 20 minutes
+            adpsStopUntil = newStopUntil;
+
+            queue_log_message_fmt("ADPS #%lu, stopping charge for 20min", (unsigned long)adpsEventCount);
             stopCharging();
         }
     });
@@ -614,18 +618,16 @@ bool startCharging() {
     }
 
     if (millis() < adpsStopUntil) {
+        queue_log_message("Refusing to start charging: ADPS stop window still active");
         return false;
     }
 
-    // writeRegister(1004, 0);
-    // "Disable after charge" and this will clear bit 14 "disable EVSE"
-    writeConfigBit(0);
-
-    // Start charging by setting the current to the max configured value
+    writeRegister(1004, 0);
+    writeConfigBit(13);
     setChargeCurrent(100 * maxCurrent);
-    
+
     charging = true;
-    Serial.println("Charging started");
+    queue_log_message("Starting to charge");
     return true;
 }
 
@@ -635,12 +637,10 @@ bool stopCharging() {
 bit1: run selftest and RCD test procedure (approx 30s)
 bit2: clear RCD error
 bit3 - bit15: not used*/
-    // writeRegister(1004, 1);
-
-    // writeConfigBit(14);
+    writeRegister(1004, 1);
     
-    // Stop charging by setting the current to 0
-    setChargeCurrent(0);
+    writeConfigBit(14);
+
 
     charging = false;
     Serial.println("Charging stopped");
@@ -684,8 +684,6 @@ void setupWebServer() {
         html.replace("%BOOT_FW%", String(evseRegs.bootFirmware));
         html.replace("%HEURES_CREUSES%", inHeuresCreuses ? "ACTIVE" : "INACTIVE");
         html.replace("%PJR_STATUS%", inPJR ? "<span style='color:red;font-weight:bold'>ACTIVE - BLOCKING ALL CHARGING</span>" : "INACTIVE");
-        
-        // Add current time
         if (ntpSynced) {
             time_t now = time(nullptr);
             struct tm timeinfo;
@@ -698,7 +696,6 @@ void setupWebServer() {
         } else {
             html.replace("%CURRENT_TIME%", "Not synced");
         }
-        
         server.send(200, "text/html", html);
     });
 
@@ -809,7 +806,7 @@ void setupOTA() {
     ArduinoOTA.setHostname("SVEVSE");
     
     // Set password for OTA updates
-    ArduinoOTA.setPassword("evse123");  // Change this password!
+    ArduinoOTA.setPassword("evse123");  
 
     ArduinoOTA.onStart([]() {
         String type;
@@ -848,6 +845,9 @@ void setupOTA() {
 
 void setup() {
     Serial.begin(115200);
+    // Reboot forensics (shows up on MQTT log after mqtt starts)
+    queue_log_message_fmt("Reset: %s", ESP.getResetReason().c_str());
+    queue_log_message_fmt("ResetInfo: %s", ESP.getResetInfo().c_str());
     evseSerial.begin(9600);
     evse.begin(1, evseSerial);
     Serial.println("Hello from Svenvse");
@@ -864,10 +864,10 @@ void setup() {
     setupMQTT();
     setupWebServer();
 
-    // Default safety values: boot current 10A, max cable 12A
-    writeRegister(2000, 10);
+    // Default safety values: boot current 12A, max cable 12A
+    writeRegister(2000, 12);
     writeRegister(2007, 12);
-    maxCurrent = 10;
+    maxCurrent = 12;
 
     // Minimal current for this car is 5A
     writeRegister(2002, 5);
@@ -878,54 +878,9 @@ void setup() {
     queue_log_message("Svenvse started");
 }
 
-void checkScheduledCharging() {
-    static bool hasEnteredPreconditioning = false;
-
-    // Scheduled charging (for cabin pre-conditioning) is Monday and Tuesday, 8h00 to 8h20
-    if (!ntpSynced) {
-        return;  // Don't check if NTP hasn't synced yet
-    }
-    // Never charge during PJR (peak red)
-    if (inPJR) {
-        return;
-    }
-    
-    time_t now = time(nullptr);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    
-    // Check if today is Monday (1) or Tuesday (2)
-    // tm_wday: 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
-    bool isMonOrTue = (timeinfo.tm_wday == 1 || timeinfo.tm_wday == 2);
-    if (!isMonOrTue) {
-        return;
-    }
-    // Calculate current time in minutes since midnight
-    int currentMinutes = timeinfo.tm_hour * 60 + timeinfo.tm_min;
-    int startMinutes = 8 * 60;
-    int endMinutes = startMinutes + 20;
-    
-    bool in_time_window = (currentMinutes >= startMinutes && currentMinutes < endMinutes);
-   
-    if (in_time_window && !charging) {
-        queue_log_message_fmt("Starting scheduled pre-conditioning at %02d:%02d on %s (6A)", 
-                            timeinfo.tm_hour, timeinfo.tm_min,
-                            timeinfo.tm_wday == 1 ? "Monday" : "Tuesday");
-        setChargeCurrent(100 * PRECONDITIONING_CURRENT);  // Set to 6A
-        startCharging();
-        hasEnteredPreconditioning = true;
-    } else if (!in_time_window && charging && hasEnteredPreconditioning) {
-        queue_log_message_fmt("Ending scheduled pre-conditioning at %02d:%02d on %s", 
-                            timeinfo.tm_hour, timeinfo.tm_min,
-                            timeinfo.tm_wday == 1 ? "Monday" : "Tuesday");
-        stopCharging();
-        setChargeCurrent(100 * maxCurrent);  // Restore max current
-    }
-}
-
 void publishStatus() {
     mqtt.publish("svevse/vehicle_state", String(evseRegs.vehicleState));
-    mqtt.publish("svevse/current_output", String(evseRegs.currentOutput / 100.));
+    mqtt.publish("svevse/current_output", String(evseRegs.currentConfig / 100.));
     mqtt.publish("svevse/evse_state", String(evseRegs.evseState));
     mqtt.publish("svevse/relay_state", String(evseRegs.rcdStatus & 1));
     mqtt.publish("svevse/charging", charging ? "1" : "0");
@@ -977,7 +932,6 @@ void loop() {
     server.handleClient();
    
     static uint32_t last_read_regs = 0;
-    static uint32_t last_schedule_check = 0;
 
     // Publish pending log messages from FIFO buffer
     // Each logBufferRead() returns one complete message and advances the read pointer
@@ -994,12 +948,6 @@ void loop() {
         last_read_regs = millis();
     }
 
-    // Check scheduled charging every 30 seconds
-    if (!last_schedule_check || millis() - last_schedule_check > 30000) {
-        checkScheduledCharging();
-        last_schedule_check = millis();
-    }
-
     // State transition: an EV was just plugged in, start charge
 /*    if (evseRegs.vehicleState == VEHICLE_EV_PRESENT && oldEvseRegs.vehicleState == VEHICLE_EVSE_READY) {
         startCharging();
@@ -1012,10 +960,14 @@ void loop() {
     }
     
     // Check ADPS timeout
-    if (adpsStopUntil > 0 && millis() > adpsStopUntil) {
+    // Use a wrap-safe comparison (millis() wraps at ~49.7 days on ESP8266)
+    if (adpsStopUntil > 0 && (int32_t)(millis() - adpsStopUntil) > 0) {
         adpsStopUntil = 0;
         if (inHeuresCreuses) {
-            startCharging();
+            queue_log_message("ADPS timeout expired in heures creuses, restarting charge");
+            if (!startCharging()) {
+                queue_log_message("ADPS timeout expired: startCharging() refused");
+            }
         } else {
             queue_log_message("ADPS timeout expired but not in heures creuses - not restarting");
         }

@@ -3,6 +3,7 @@
 #include <ESP8266WebServer.h>
 #include <user_interface.h>
 #include "wifi_params.h"
+#include <stdarg.h>
 
 #include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
@@ -51,12 +52,9 @@ struct thermometer {
 }; 
 
 const int chaudiere = D5;
-const int pushbtn = 12;
 
 unsigned long int forced_heating_until = 0;
 unsigned long int send_next_ping_at = 15*60*1000;
-
-bool pushbtn_pressed = false;
 
 int boiler_val = 0;
 
@@ -82,6 +80,19 @@ const char *mode_names[] = {
 float thermostat_target_temp; 
 
 char logStr[1024];
+
+static void appendf(char *dst, size_t dst_sz, const char *fmt, ...)
+{
+    size_t len = strlen(dst);
+    if (len >= dst_sz) {
+        return;
+    }
+
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(dst + len, dst_sz - len, fmt, ap);
+    va_end(ap);
+}
 
 // Stove status
 int stove_status;
@@ -203,29 +214,21 @@ static void handleRoot() {
 
     tempBuf[0] = 0; 
     for (unsigned int i = 0; i < ARRAY_SZ(TRVs); i++) {
-        sprintf(tempBuf+strlen(tempBuf), "<tr><td>%s</td><td>%d</td><td>%.1f C</td><td>%.1f C</td><td>%d min ago</td></tr>", TRVs[i].name, TRVs[i].active, TRVs[i].current_temp, TRVs[i].target_temp, (int)(millis() - TRVs[i].last_seen)/(60 * 1000));
+        appendf(tempBuf, sizeof(tempBuf), "<tr><td>%s</td><td>%d</td><td>%.1f C</td><td>%.1f C</td><td>%d min ago</td></tr>", TRVs[i].name, TRVs[i].active, TRVs[i].current_temp, TRVs[i].target_temp, (int)(millis() - TRVs[i].last_seen)/(60 * 1000));
     } 
    
     websrv.sendContent(tempBuf); 
     tempBuf[0] = 0; 
     websrv.sendContent("<table><thead><tr><th>Thermometer</th><th>Current</th><th>Last seen</th></tr></thead><tbody>");
     for (unsigned int i = 0; i < ARRAY_SZ(thermometers); i++) {
-        sprintf(tempBuf+strlen(tempBuf), "<tr><td>%s</td><td>%.1f C</td><td>%d min ago</td></tr>", thermometers[i].name, thermometers[i].current_temp, (int)(millis() - thermometers[i].last_seen)/(60 * 1000));
+        appendf(tempBuf, sizeof(tempBuf), "<tr><td>%s</td><td>%.1f C</td><td>%d min ago</td></tr>", thermometers[i].name, thermometers[i].current_temp, (int)(millis() - thermometers[i].last_seen)/(60 * 1000));
     } 
 
 
-    strcat(tempBuf, lastLogStr);
-    strcat(tempBuf, "</body></html>");
+    appendf(tempBuf, sizeof(tempBuf), "%s", lastLogStr);
+    appendf(tempBuf, sizeof(tempBuf), "</body></html>");
 	websrv.sendContent(tempBuf);
     websrv.client().stop();
-}
-
-/* Physical button */
-static void IRAM_ATTR pushbtn_intr(void)
-{
-	if (!digitalRead(pushbtn)) {
-		pushbtn_pressed = true;
-	}
 }
 
 /* OTA */
@@ -247,7 +250,7 @@ struct TRV *find_TRV(const char *name)
         if (!strcmp(TRVs[i].name, name)) 
             return &TRVs[i];
     }
-    sprintf(logStr, "Cannot find TRV for %s:", name);
+    snprintf(logStr, sizeof(logStr), "Cannot find TRV for %s:", name);
     return NULL;
 }
 
@@ -290,7 +293,7 @@ void mqtt_TRV_systemmode_cb(const char *topic, const char *payload)
     } else if (!strcmp(payload, "heat")) {
         trv->active = true;
     } else {
-        sprintf(logStr, "Cannot identify TRV state %s for %s", payload, topic);
+        snprintf(logStr, sizeof(logStr), "Cannot identify TRV state %s for %s", payload, topic);
     }
 
     trv->last_seen = millis();
@@ -309,7 +312,7 @@ void mqtt_TRV_temp_handle(const char *topic, const char *payload, uint32_t offse
 
     float temp = atof(payload);
     if (temp < 0 || temp > 40) {
-        sprintf(logStr, "Temperature seems bogus: %s", payload);
+        snprintf(logStr, sizeof(logStr), "Temperature seems bogus: %s", payload);
         return;
     }
 
@@ -336,7 +339,7 @@ struct thermometer *find_thermometer(const char *name)
         if (!strcmp(thermometers[i].name, name)) 
             return &thermometers[i];
     }
-    sprintf(logStr, "Cannot find thermometer for %s:", name);
+    snprintf(logStr, sizeof(logStr), "Cannot find thermometer for %s:", name);
     return NULL;
 }
 
@@ -351,14 +354,14 @@ void mqtt_thermometer_cb(const char *topic, const char *payload)
 
     struct thermometer *therm = find_thermometer(therm_name);
     if (!therm) {
-        sprintf(logStr, "Cannot identify thermometer with name %s", therm_name);
+        snprintf(logStr, sizeof(logStr), "Cannot identify thermometer with name %s", therm_name);
         return;
     }
 
     float temp = atof(payload);
     if (strcmp(therm_name, "exterior_thermometer") && (temp < 5 || temp > 40)) {
         // sanity check (except for exterior thermometer)
-        sprintf(logStr, "Temperature seems bogus: %s", payload);
+        snprintf(logStr, sizeof(logStr), "Temperature seems bogus: %s", payload);
         return;
     }
 
@@ -419,6 +422,7 @@ bool TRV_requires_heat(void)
 
         if (last_seen_too_old(trv->last_seen)) {
             sprintf(logStr, "TRV %s is too old, ignoring", trv->name);
+            continue;
         }
 
         // If the current temperature seen by the TRV is greater than the
@@ -493,13 +497,13 @@ bool heat_living_with_stove(void)
 
     if (millis() < holdoff_for_stove_until) {
         // Holding off heating, stove is already starting
-        strcat(logStr, "--> holding off for stove");
+        appendf(logStr, sizeof(logStr), "--> holding off for stove");
         return true;
     }
 
     if (start_stove) {
         mqtt.publish("controlepoele/cmd", "CMD+ON");
-        strcat(logStr, "--> starting stove");
+        appendf(logStr, sizeof(logStr), "--> starting stove");
         holdoff_for_stove_until = millis() + 20 * 60 * 1000;
         return true;
     }
@@ -556,39 +560,37 @@ bool thermostat_requires_heat(void)
 }
 
 void setup ( void ) {
-	pinMode ( chaudiere, OUTPUT );
-	pinMode(pushbtn, INPUT_PULLUP);
-	Serial.begin ( 115200 );
-	
-	WiFi.mode(WIFI_STA);
-	WiFi.begin ("agoctrl_EXT", password );
-	Serial.println ("Boiler control starting, connecting to wifi.");
+    pinMode(chaudiere, OUTPUT);
+    Serial.begin(115200);
 
-	// Wait for connection
-	while ( WiFi.status() != WL_CONNECTED ) {
-		delay ( 500 );
-		Serial.print ( "." );
-	}
+    WiFi.mode(WIFI_STA);
+	WiFi.begin(ssid, password);
+    Serial.println("Boiler control starting, connecting to wifi.");
 
-	Serial.println ( "" );
-	Serial.print ( "Cnnectd to " );
-	Serial.println ( ssid );
-	Serial.print ( "IP " );
-	Serial.println ( WiFi.localIP() );
+    // Wait for connection
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
 
-	websrv.on ( "/", handleRoot );
-	websrv.on ( "/hot", handleHot);
-	websrv.on ( "/forceon", handleForceOn );
-	websrv.on ( "/cold", handleCold);
+    Serial.println("");
+    Serial.print("Cnnectd to ");
+    Serial.println(ssid);
+    Serial.print("IP ");
+    Serial.println(WiFi.localIP());
 
-	websrv.begin();
+    websrv.on("/", handleRoot);
+    websrv.on("/hot", handleHot);
+    websrv.on("/forceon", handleForceOn);
+    websrv.on("/cold", handleCold);
+
+    websrv.begin();
 
     ArduinoOTA.onError(ota_onerror);
     ArduinoOTA.onProgress(ota_onprogress);
     ArduinoOTA.setHostname("boiler-control");
     ArduinoOTA.begin();
 		  
-	attachInterrupt(digitalPinToInterrupt(pushbtn), pushbtn_intr, FALLING);
     set_boiler(0);
     queue_change_mode(COLD);
 
@@ -667,14 +669,6 @@ void loop (void) {
 
     mqtt.loop();
 	websrv.handleClient();
-
-	if (pushbtn_pressed && !digitalRead(pushbtn)) {
-		delay(5);
-		if (!digitalRead(pushbtn)) {
-            queue_change_mode(FORCED);
-			pushbtn_pressed = false;
-		}
-	}
 
     if (current_mode == FORCED) {
         // End of forced heating
